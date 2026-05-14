@@ -1,3 +1,4 @@
+const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const puppeteer = require('puppeteer');
@@ -59,8 +60,14 @@ const getPuppeteerLaunchOptions = () => {
 
   const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
   if (executablePath) {
-    launchOptions.executablePath = executablePath;
-    console.log('Using configured Puppeteer executable path:', executablePath);
+    if (fs.existsSync(executablePath)) {
+      launchOptions.executablePath = executablePath;
+      console.log('Using configured Puppeteer executable path:', executablePath);
+    } else {
+      console.warn(
+        `Configured Puppeteer executable path does not exist: ${executablePath}. Falling back to Puppeteer default browser path.`
+      );
+    }
   } else {
     console.log('No PUPPETEER_EXECUTABLE_PATH configured; using Puppeteer default browser path.');
   }
