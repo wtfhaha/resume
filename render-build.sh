@@ -15,22 +15,15 @@ export PUPPETEER_CACHE_DIR
 INSTALL_OUTPUT=$(npx puppeteer browsers install chrome 2>&1)
 echo "$INSTALL_OUTPUT"
 
-# Extract the base directory where Chrome is downloaded
-BROWSER_DIR=$(echo "$INSTALL_OUTPUT" | grep "Browser is downloaded to:" | sed -E 's/Browser is downloaded to: //')
+# Extract the full path to the chrome executable
+# This assumes the path is the last word on a line containing "/opt/render/.cache/puppeteer/chrome/"
+CHROME_EXECUTABLE=$(echo "$INSTALL_OUTPUT" | grep -oP '/opt/render/\.cache/puppeteer/chrome/[^[:space:]]+' | tail -n 1 || true)
 
-# Construct the full executable path
-if [ -n "$BROWSER_DIR" ]; then
-  # Find the 'chrome' executable within the downloaded directory
-  CHROME_EXECUTABLE=$(find "$BROWSER_DIR" -name "chrome" -type f -print -quit)
-
-  if [ -n "$CHROME_EXECUTABLE" ]; then
-    export PUPPETEER_EXECUTABLE_PATH="$CHROME_EXECUTABLE"
-    echo "PUPPETEER_EXECUTABLE_PATH set to: $PUPPETEER_EXECUTABLE_PATH"
-  else
-    echo "Error: 'chrome' executable not found within $BROWSER_DIR."
-    exit 1
-  fi
+# Export the path for the application to use
+if [ -n "$CHROME_EXECUTABLE" ]; then
+  export PUPPETEER_EXECUTABLE_PATH="$CHROME_EXECUTABLE"
+  echo "PUPPETEER_EXECUTABLE_PATH set to: $PUPPETEER_EXECUTABLE_PATH"
 else
-  echo "Error: Could not determine browser download directory from puppeteer install output."
-  exit 1
+  echo "Error: Could not determine Chrome executable path from puppeteer install output."
+  exit 1 # Exit with an error to fail the Render build
 fi
