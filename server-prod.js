@@ -177,10 +177,12 @@ app.post('/api/generate-pdf', async (req, res) => {
   try {
     const browser = await puppeteer.launch({
       headless: true,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--disable-gpu',
         '--single-process'
       ]
     });
