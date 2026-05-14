@@ -98,6 +98,29 @@ const getContactLinkUrl = (contact) => {
   return normalizeContactUrl(linkValue);
 };
 
+const getPuppeteerLaunchOptions = () => {
+  const launchOptions = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--single-process'
+    ]
+  };
+
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
+  if (executablePath) {
+    launchOptions.executablePath = executablePath;
+    console.log('Using configured Puppeteer executable path:', executablePath);
+  } else {
+    console.log('No PUPPETEER_EXECUTABLE_PATH configured; using Puppeteer default browser path.');
+  }
+
+  return launchOptions;
+};
+
 // --- TEMPLATE FUNCTIONS ---
 
 // Template 1: Modern Multi-Column
@@ -856,14 +879,7 @@ app.post("/api/generate-pdf", async (req, res) => {
         break;
     }
     console.log("[/api/generate-pdf] Launching Puppeteer...");
-    const browser = await puppeteer.launch({
-      executablePath: 
-        process.env.NODE_ENV === "production" 
-        ? process.env.PUPPETEER_EXECUTABLE_PATH
-        : undefined,
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--single-process", "--no-zygote"],
-    });
+    const browser = await puppeteer.launch(getPuppeteerLaunchOptions());
     console.log("[/api/generate-pdf] Puppeteer launched. Creating new page...");
     const page = await browser.newPage();
     console.log("[/api/generate-pdf] Setting page content...");

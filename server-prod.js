@@ -12,8 +12,8 @@ const PORT = process.env.PORT || 5001;
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' 
     ? [
-        'https://yourdomain.com', 
-        'https://www.yourdomain.com',
+        'https://my-aitools.online', 
+        'https://www.my-aitools.online',
         process.env.FRONTEND_URL // Allow setting via environment variable
       ].filter(Boolean)
     : ['http://localhost:3000'],
@@ -43,6 +43,29 @@ const validateApiKey = () => {
     return false;
   }
   return true;
+};
+
+const getPuppeteerLaunchOptions = () => {
+  const launchOptions = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--single-process'
+    ]
+  };
+
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
+  if (executablePath) {
+    launchOptions.executablePath = executablePath;
+    console.log('Using configured Puppeteer executable path:', executablePath);
+  } else {
+    console.log('No PUPPETEER_EXECUTABLE_PATH configured; using Puppeteer default browser path.');
+  }
+
+  return launchOptions;
 };
 
 // API Routes
@@ -175,17 +198,7 @@ app.post('/api/generate-pdf', async (req, res) => {
   }
 
   try {
-    const browser = await puppeteer.launch({
-      headless: true,
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--single-process'
-      ]
-    });
+    const browser = await puppeteer.launch(getPuppeteerLaunchOptions());
 
     const page = await browser.newPage();
     
