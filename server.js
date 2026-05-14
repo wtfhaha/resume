@@ -5,6 +5,7 @@ const express = require("express");
 const cors = require("cors");
 const { Groq } = require("groq-sdk");
 const puppeteer = require("puppeteer");
+require("dotenv").config();
 
 // dotenv.config(); // No longer loading from .env file
 
@@ -856,8 +857,11 @@ app.post("/api/generate-pdf", async (req, res) => {
     }
     console.log("[/api/generate-pdf] Launching Puppeteer...");
     const browser = await puppeteer.launch({
+      executablePath: 
+        process.env.NODE_ENV === "production" 
+        ? process.env.PUPPETEER_EXECUTABLE_PATH
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "single-process", "--no-zygote"],
     });
     console.log("[/api/generate-pdf] Puppeteer launched. Creating new page...");
     const page = await browser.newPage();
