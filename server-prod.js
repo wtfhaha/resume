@@ -60,12 +60,14 @@ const getPuppeteerLaunchOptions = () => {
 
   const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
   if (executablePath) {
-    if (fs.existsSync(executablePath)) {
+    try {
+      fs.accessSync(executablePath, fs.constants.X_OK);
       launchOptions.executablePath = executablePath;
       console.log('Using configured Puppeteer executable path:', executablePath);
-    } else {
+    } catch (accessError) {
       console.warn(
-        `Configured Puppeteer executable path does not exist: ${executablePath}. Falling back to Puppeteer default browser path.`
+        `Configured Puppeteer executable path is not usable: ${executablePath}. Falling back to Puppeteer default browser path.`,
+        accessError.message
       );
     }
   } else {
