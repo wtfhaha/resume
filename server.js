@@ -21,6 +21,51 @@ const port = process.env.PORT || 5001;
 app.use(cors());
 app.use(express.json());
 
+// --- Helper: Validate API Key ---
+const validateApiKey = () => {
+  if (!DEEPINFRA_API_KEY || DEEPINFRA_API_KEY === 'YOUR_DEEPINFRA_API_KEY_HERE') {
+    console.error('ERROR: DEEPINFRA_API_KEY is not configured properly');
+    console.error('Please set your actual DeepInfra API key in server/.env');
+    return false;
+  }
+  return true;
+};
+
+// --- Helper: Call DeepInfra Chat API ---
+const deepInfraChatCompletion = async ({
+  messages,
+  model = DEEPINFRA_MODEL,
+  temperature = 0.7,
+  max_tokens = 4096,
+}) => {
+  if (typeof fetch === 'undefined') {
+    throw new Error('Global fetch is not available in this Node runtime.');
+  }
+
+  const response = await fetch(`${DEEPINFRA_API_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      temperature,
+      max_tokens,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(
+      `DeepInfra API error ${response.status}: ${response.statusText} - ${errorBody}`,
+    );
+  }
+
+  return response.json();
+};
+
 // --- Sanitization Function ---
 const sanitizeResumeJson = (data) => {
   const unwantedPatterns = [
