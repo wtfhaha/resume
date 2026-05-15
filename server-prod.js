@@ -3,8 +3,13 @@ const express = require('express');
 const cors = require('cors');
 const puppeteer = require('puppeteer');
 const pdfParse = require('pdf-parse');
-const Groq = require('groq-sdk');
 require('dotenv').config({ path: '.env.production' });
+
+const DEEPINFRA_API_URL =
+  process.env.DEEPINFRA_API_URL || 'https://api.deepinfra.com/v1/openai';
+const DEEPINFRA_API_KEY = process.env.DEEPINFRA_API_KEY;
+const DEEPINFRA_MODEL =
+  process.env.DEEPINFRA_MODEL || 'deepseek-ai/DeepSeek-V4-Flash';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -24,26 +29,50 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Initialize Groq with error handling
-let groq;
-try {
-  groq = new Groq({
-    apiKey: process.env.GROQ_API_KEY,
-  });
-  console.log('Groq client initialized successfully');
-} catch (error) {
-  console.error('Failed to initialize Groq client:', error.message);
-  process.exit(1);
-}
-
 // Helper function to validate API key
 const validateApiKey = () => {
-  if (!process.env.GROQ_API_KEY || process.env.GROQ_API_KEY === 'YOUR_GROQ_API_KEY_HERE') {
-    console.error('ERROR: GROQ_API_KEY is not configured properly');
-    console.error('Please set your actual Groq API key in server/.env.production');
+  if (!DEEPINFRA_API_KEY || DEEPINFRA_API_KEY === 'YOUR_DEEPINFRA_API_KEY_HERE') {
+    console.error('ERROR: DEEPINFRA_API_KEY is not configured properly');
+    console.error(
+      'Please set your actual DeepInfra API key in server/.env.production or environment variables',
+    );
     return false;
   }
   return true;
+};
+
+const deepInfraChatCompletion = async ({
+  messages,
+  model = DEEPINFRA_MODEL,
+  temperature = 0.7,
+  max_tokens = 4096,
+}) => {
+  if (typeof fetch === 'undefined') {
+    throw new Error('Global fetch is not available in this Node runtime.');
+  }
+
+  const response = await fetch(`${DEEPINFRA_API_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      temperature,
+      max_tokens,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(
+      `DeepInfra API error ${response.status}: ${response.statusText} - ${errorBody}`,
+    );
+  }
+
+  return response.json();
 };
 
 const getPuppeteerLaunchOptions = () => {
@@ -126,14 +155,14 @@ ${resumeText}
 Job Description:
 ${jobDescription}`;
 
-    const chatCompletion = await groq.chat.completions.create({
+    const chatCompletion = await deepInfraChatCompletion({
+      model: DEEPINFRA_MODEL,
       messages: [
         {
           role: "user",
           content: optimizationPrompt
         }
       ],
-      model: "deepseek-r1-distill-llama-70b",
       temperature: 0.7,
       max_tokens: 4000,
     });
@@ -175,14 +204,14 @@ app.post('/api/extract-title', async (req, res) => {
 Resume:
 ${resumeText}`;
 
-    const chatCompletion = await groq.chat.completions.create({
+    const chatCompletion = await deepInfraChatCompletion({
+      model: DEEPINFRA_MODEL,
       messages: [
         {
           role: "user",
           content: titlePrompt
         }
       ],
-      model: "llama3-8b-8192",
       temperature: 0.3,
       max_tokens: 100,
     });

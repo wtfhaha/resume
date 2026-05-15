@@ -4,9 +4,14 @@ require("dotenv").config();
 const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
-const { Groq } = require("groq-sdk");
 const puppeteer = require("puppeteer");
 require("dotenv").config();
+
+const DEEPINFRA_API_URL =
+  process.env.DEEPINFRA_API_URL || "https://api.deepinfra.com/v1/openai";
+const DEEPINFRA_API_KEY = process.env.DEEPINFRA_API_KEY;
+const DEEPINFRA_MODEL =
+  process.env.DEEPINFRA_MODEL || "deepseek-ai/DeepSeek-V4-Flash";
 
 // dotenv.config(); // No longer loading from .env file
 
@@ -667,10 +672,6 @@ const createResumeHtml_GradientCreative = (data) => {
   `;
 };
 
-// --- GROQ Client Initialization ---
-// Assuming GROQ_API_KEY is set as an environment variable
-const groq = new Groq();
-
 // --- API Endpoints ---
 
 // NEW: Endpoint to extract job title using AI
@@ -709,8 +710,9 @@ ${resumeText}
 Job Title:`;
 
   try {
-    console.log("Calling Groq API for title extraction...");
-    const chatCompletion = await groq.chat.completions.create({
+    console.log("Calling DeepInfra API for title extraction...");
+    const chatCompletion = await deepInfraChatCompletion({
+      model: DEEPINFRA_MODEL,
       messages: [
         {
           role: "system",
@@ -719,24 +721,20 @@ Job Title:`;
         },
         { role: "user", content: prompt },
       ],
-      model: "llama-3.3-70b-versatile", // Using a potentially faster model for this focused task
-      temperature: 0.2, // Lower temperature for more deterministic title extraction
-      max_tokens: 50, // Generous buffer for title length
-      top_p: 1,
-      stop: null,
-      stream: false,
+      temperature: 0.2,
+      max_tokens: 50,
     });
 
     let extractedTitle =
       chatCompletion.choices[0]?.message?.content?.trim() || "";
-    console.log("Groq API response for title:", extractedTitle);
+    console.log("DeepInfra API response for title:", extractedTitle);
 
     // Basic cleanup: remove potential quotes or leading/trailing punctuation sometimes added by AI
     extractedTitle = extractedTitle.replace(/^["'\s]+|["'\s\.]+$/g, "");
 
     res.json({ extractedTitle });
   } catch (error) {
-    console.error("Error calling Groq API for title extraction:", error);
+    console.error("Error calling DeepInfra API for title extraction:", error);
     res
       .status(500)
       .json({ error: "Failed to extract title from resume using AI" });
@@ -754,15 +752,9 @@ app.post("/api/optimize-resume", async (req, res) => {
       .json({ error: "Missing resumeText or jobDescription" });
   }
   console.log(`[/api/optimize-resume] Style received: ${style}`);
-  const groqApiKey = process.env.GROQ_API_KEY;
-  if (!groqApiKey) {
-    console.error("Error: GROQ_API_KEY environment variable not set.");
-    return res.status(500).json({ error: "Server configuration error." });
-  }
   console.log("[/api/optimize-resume] Starting optimization process...");
   try {
     console.log("[/api/optimize-resume] Constructing prompt...");
-    const client = new Groq({ apiKey: groqApiKey });
 
     // Define prompt components using simple strings
     const promptCore =
@@ -825,22 +817,21 @@ app.post("/api/optimize-resume", async (req, res) => {
       "Optimized Resume JSON:\n    ";
 
     console.log(
-      `[/api/optimize-resume] Sending prompt to Groq with style: ${style}`,
+      `[/api/optimize-resume] Sending prompt to DeepInfra with style: ${style}`,
     );
     // console.log("Full prompt:", finalPrompt); // Optional: uncomment to debug the exact prompt being sent
-    const completion = await client.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+    const completion = await deepInfraChatCompletion({
+      model: DEEPINFRA_MODEL,
       messages: [{ role: "user", content: finalPrompt }],
       temperature: 0.4,
       max_tokens: 4096,
-      response_format: { type: "json_object" },
     });
-    console.log("[/api/optimize-resume] Groq API call completed.");
+    console.log("[/api/optimize-resume] DeepInfra API call completed.");
     let optimizedResumeJson;
     try {
-      console.log("[/api/optimize-resume] Parsing Groq response...");
+      console.log("[/api/optimize-resume] Parsing DeepInfra response...");
       optimizedResumeJson = JSON.parse(completion.choices[0].message.content);
-      console.log("[/api/optimize-resume] Groq response parsed successfully.");
+      console.log("[/api/optimize-resume] DeepInfra response parsed successfully.");
 
       // *** ADD SANITIZATION STEP ***
       console.log("[/api/optimize-resume] Sanitizing JSON response...");
@@ -850,7 +841,7 @@ app.post("/api/optimize-resume", async (req, res) => {
       res.json({ optimizedResumeJson: sanitizedJson }); // Send sanitized JSON
     } catch (parseError) {
       console.error(
-        "Failed to parse Groq JSON response:",
+        "Failed to parse DeepInfra JSON response:",
         completion.choices[0].message.content,
       );
       throw new Error("AI failed to return valid JSON structure.");
