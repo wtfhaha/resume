@@ -276,11 +276,11 @@ const createResumeHtml_Modern = (data) => {
       : "";
   let experienceHtml = "";
   experience.forEach((exp) => {
-    experienceHtml += `<div class="experience-item"><div class="item-header"><strong>${exp.title || "[Job Title]"}</strong><span class="dates">${exp.dates || "[Dates]"}</span></div><span class="company">${exp.company || "[Company]"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`;
+    experienceHtml += `<div class="experience-item"><div class="item-header"><strong>${exp.title || "[Job Title]"}</strong>${exp.dates ? `<span class="dates">${exp.dates}</span>` : ""}</div><span class="company">${exp.company || "[Company]"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`;
   });
   let educationHtml = "";
   education.forEach((edu) => {
-    educationHtml += `<div class="education-item"><div class="item-header"><strong>${edu.degree || "[Degree]"}</strong><span class="dates">${edu.dates || "[Year Graduated]"}</span></div><span class="institution">${edu.institution || "[Institution]"}</span></div>`;
+    educationHtml += `<div class="education-item"><div class="item-header"><strong>${edu.degree || "[Degree]"}</strong>${edu.dates ? `<span class="dates">${edu.dates}</span>` : ""}</div><span class="institution">${edu.institution || "[Institution]"}</span></div>`;
   });
   const summaryHtml = summary
     ? `<div class="section"><h2>Summary</h2><p>${summary}</p></div>`
@@ -356,11 +356,11 @@ const createResumeHtml_Classic = (data) => {
   }
   let experienceHtml = "";
   experience.forEach((exp) => {
-    experienceHtml += `<div class="experience-item"><div class="item-header"><span class="title-company">${exp.title || "[Job Title]"}</span><span class="dates">${exp.dates || "[Dates]"}</span></div><span class="company">${exp.company || "[Company]"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`;
+    experienceHtml += `<div class="experience-item"><div class="item-header"><span class="title-company">${exp.title || "[Job Title]"}</span>${exp.dates ? `<span class="dates">${exp.dates}</span>` : ""}</div><span class="company">${exp.company || "[Company]"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`;
   });
   let educationHtml = "";
   education.forEach((edu) => {
-    educationHtml += `<div class="education-item"><div class="item-header"><span class="title-company">${edu.degree || "[Degree]"}</span><span class="dates">${edu.dates || "[Year Graduated]"}</span></div><span class="institution">${edu.institution || "[Institution]"}</span></div>`;
+    educationHtml += `<div class="education-item"><div class="item-header"><span class="title-company">${edu.degree || "[Degree]"}</span>${edu.dates ? `<span class="dates">${edu.dates}</span>` : ""}</div><span class="institution">${edu.institution || "[Institution]"}</span></div>`;
   });
   const skillsHtml =
     skills.length > 0
@@ -498,13 +498,13 @@ const createResumeHtml_Executive = (data) => {
   const experienceHtml = experience
     .map(
       (exp) =>
-        `<div class="timeline-item"><div class="dates">${exp.dates || "Dates"}</div><div><div class="item-title">${exp.title || "Job Title"}</div><span class="company">${exp.company || "Company Name Here"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div></div>`,
+        `<div class="timeline-item"><div class="dates">${exp.dates || ""}</div><div><div class="item-title">${exp.title || "Job Title"}</div><span class="company">${exp.company || "Company Name Here"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div></div>`,
     )
     .join("");
   const educationHtml = education
     .map(
       (edu) =>
-        `<div class="compact-item"><div class="dates">${edu.dates || "Year"}</div><div><div class="item-title">${edu.degree || "Degree"}</div><span class="institution">${edu.institution || "Institution"}</span></div></div>`,
+        `<div class="compact-item"><div class="dates">${edu.dates || ""}</div><div><div class="item-title">${edu.degree || "Degree"}</div><span class="institution">${edu.institution || "Institution"}</span></div></div>`,
     )
     .join("");
   const skillsHtml = skills.length
@@ -563,13 +563,13 @@ const createResumeHtml_Blueprint = (data) => {
   const experienceHtml = experience
     .map(
       (exp) =>
-        `<div class="experience-item"><div class="item-header"><strong>${exp.title || "Job Title"}</strong><span class="dates">${exp.dates || "mm/yyyy – mm/yyyy"}</span></div><span class="company">${exp.company || "Company name (City, Country)"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`,
+        `<div class="experience-item"><div class="item-header"><strong>${exp.title || "Job Title"}</strong>${exp.dates ? `<span class="dates">${exp.dates}</span>` : ""}</div><span class="company">${exp.company || "Company name (City, Country)"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`,
     )
     .join("");
   const educationHtml = education
     .map(
       (edu) =>
-        `<div class="education-item"><div class="item-header"><strong>${edu.degree || "Degree"}</strong><span class="dates">${edu.dates || "mm/yyyy – mm/yyyy"}</span></div><span class="institution">${edu.institution || "Name of the institution or university"}</span></div>`,
+        `<div class="education-item"><div class="item-header"><strong>${edu.degree || "Degree"}</strong>${edu.dates ? `<span class="dates">${edu.dates}</span>` : ""}</div><span class="institution">${edu.institution || "Name of the institution or university"}</span></div>`,
     )
     .join("");
   const skillsHtml = skills.length
@@ -662,7 +662,7 @@ const createResumeHtml_Creative = (data) => {
     experienceHtml += `
           <div class="experience-item">
               <div class="item-header">
-                  <span class="dates">${exp.dates || "[Dates]"}</span>
+                  ${exp.dates ? `<span class="dates">${exp.dates}</span>` : ""}
                   <strong>${exp.title || "[Job Title]"}</strong>
               </div>
               <span class="company">${exp.company || "[Company]"}</span>
@@ -676,7 +676,7 @@ const createResumeHtml_Creative = (data) => {
     educationHtml += `
           <div class="education-item">
               <div class="item-header">
-                  <span class="dates">${edu.dates || "[Year Graduated]"}</span>
+                  ${edu.dates ? `<span class="dates">${edu.dates}</span>` : ""}
                   <strong>${edu.degree || "[Degree]"}</strong>
               </div>
               <span class="institution">${edu.institution || "[Institution]"}</span>
