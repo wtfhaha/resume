@@ -23,9 +23,12 @@ app.use(express.json());
 
 // --- Helper: Validate API Key ---
 const validateApiKey = () => {
-  if (!DEEPINFRA_API_KEY || DEEPINFRA_API_KEY === 'YOUR_DEEPINFRA_API_KEY_HERE') {
-    console.error('ERROR: DEEPINFRA_API_KEY is not configured properly');
-    console.error('Please set your actual DeepInfra API key in server/.env');
+  if (
+    !DEEPINFRA_API_KEY ||
+    DEEPINFRA_API_KEY === "YOUR_DEEPINFRA_API_KEY_HERE"
+  ) {
+    console.error("ERROR: DEEPINFRA_API_KEY is not configured properly");
+    console.error("Please set your actual DeepInfra API key in server/.env");
     return false;
   }
   return true;
@@ -38,15 +41,15 @@ const deepInfraChatCompletion = async ({
   temperature = 0.7,
   max_tokens = 4096,
 }) => {
-  if (typeof fetch === 'undefined') {
-    throw new Error('Global fetch is not available in this Node runtime.');
+  if (typeof fetch === "undefined") {
+    throw new Error("Global fetch is not available in this Node runtime.");
   }
 
   const response = await fetch(`${DEEPINFRA_API_URL}/chat/completions`, {
-    method: 'POST',
+    method: "POST",
     headers: {
       Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
       model,
@@ -153,12 +156,10 @@ const getPuppeteerLaunchOptions = () => {
   const launchOptions = {
     headless: true,
     args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--single-process'
-    ]
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+    ],
   };
 
   const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
@@ -166,18 +167,44 @@ const getPuppeteerLaunchOptions = () => {
     try {
       fs.accessSync(executablePath, fs.constants.X_OK);
       launchOptions.executablePath = executablePath;
-      console.log('Using configured Puppeteer executable path:', executablePath);
+      console.log(
+        "Using configured Puppeteer executable path:",
+        executablePath,
+      );
     } catch (accessError) {
       console.warn(
         `Configured Puppeteer executable path is not usable: ${executablePath}. Falling back to Puppeteer default browser path.`,
-        accessError.message
+        accessError.message,
       );
     }
   } else {
-    console.log('No PUPPETEER_EXECUTABLE_PATH configured; using Puppeteer default browser path.');
+    console.log(
+      "No PUPPETEER_EXECUTABLE_PATH configured; using Puppeteer default browser path.",
+    );
   }
 
   return launchOptions;
+};
+
+// PDF generation — no artificial scaling or page balancing.
+// Content renders at natural size so there are no huge empty gaps.
+const createPdfBufferFromHtml = async (page, htmlContent) => {
+  await page.setContent(htmlContent, { waitUntil: "networkidle0" });
+  await page.evaluate(() =>
+    document.fonts && document.fonts.ready ? document.fonts.ready : undefined,
+  );
+
+  const pdfBuffer = await page.pdf({
+    format: "A4",
+    printBackground: true,
+    margin: { top: "0", bottom: "0", left: "0", right: "0" },
+    preferCSSPageSize: true,
+  });
+
+  return {
+    pdfBuffer,
+    pagination: { scale: 1, finalMetrics: { pages: 1, lastPageUsage: 1 } },
+  };
 };
 
 // --- TEMPLATE FUNCTIONS ---
@@ -232,7 +259,8 @@ const createResumeHtml_Modern = (data) => {
   const education = data.education || [];
   const skills = data.skills || [];
   const contactLinkUrl = getContactLinkUrl(contact);
-  const contactLinkText = contact.link || contact.behance || "Website/Portfolio";
+  const contactLinkText =
+    contact.link || contact.behance || "Website/Portfolio";
   let contactHtml = '<div class="section contact-info"><h2>Contact</h2>';
   if (contact.email)
     contactHtml += `<p><a href="mailto:${contact.email}">${contact.email}</a></p>`;
@@ -341,10 +369,214 @@ const createResumeHtml_Classic = (data) => {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${name} - Resume</title><style>${styles}</style></head><body><div class="page"><h1>${name}</h1>${profession ? `<div class="profession-title">${profession}</div>` : ""}<div class="contact-info">${contactHtml}</div>${summary ? `<div class="section"><h2>Summary</h2><p>${summary}</p></div>` : ""}${experience.length > 0 ? `<div class="section"><h2>Experience</h2>${experienceHtml}</div>` : ""}${education.length > 0 ? `<div class="section"><h2>Education</h2>${educationHtml}</div>` : ""}${skills.length > 0 ? `<div class="section"><h2>Skills</h2>${skillsHtml}</div>` : ""}</div></body></html>`;
 };
 
-// Template 3: Compact (Placeholder - uses Classic for now)
+// Template 3: Modern Monochrome - tall, editorial single-column layout inspired by reference 1
 const createResumeHtml_Compact = (data) => {
-  // Add distinct compact styling later if needed
-  return createResumeHtml_Classic(data); // Automatically gets Classic's updated fonts
+  const styles = `
+    @page { size: A4; margin: 21mm 25mm 24mm; }
+    body { margin: 0; padding: 0; background: #fff; color: #30343a; font-family: Arial, Helvetica, sans-serif; font-size: 9.4pt; line-height: 1.34; }
+    .page { box-sizing: border-box; min-height: auto; }
+    .header { margin-bottom: 14mm; }
+    h1 { margin: 0; color: #2f3640; font-size: 26pt; line-height: 0.98; font-weight: 800; letter-spacing: 5px; text-transform: uppercase; }
+    .profession-title { margin-top: 4mm; color: #9a9ca0; font-size: 8.2pt; font-weight: 700; letter-spacing: 3.5px; text-transform: uppercase; }
+    h2 { margin: 8mm 0 3.2mm; color: #30343a; font-size: 11.2pt; font-weight: 900; letter-spacing: 2.3px; text-transform: uppercase; page-break-after: avoid; break-after: avoid; }
+    .contact-info { color: #565b61; font-size: 8pt; }
+    .contact-info a { color: #565b61; text-decoration: none; }
+    .section { margin-bottom: 5.4mm; page-break-inside: avoid; break-inside: avoid; }
+    p { margin: 0; color: #53585f; }
+    .experience-item, .education-item { margin-bottom: 5.2mm; page-break-inside: avoid; break-inside: avoid; }
+    .item-header { display: block; margin-bottom: 1mm; }
+    .item-header strong { color: #30343a; font-size: 9.8pt; font-weight: 900; text-transform: uppercase; }
+    .item-header .dates { color: #6f747b; font-size: 8.8pt; }
+    .company, .institution { display: block; color: #565b61; font-size: 8.9pt; margin-bottom: 1.6mm; }
+    ul { margin: 1.4mm 0 0 7mm; padding: 0; }
+    li { margin-bottom: 0.8mm; padding-left: 1mm; color: #4f545a; }
+    .skills-list { list-style: none; margin: 0; padding: 0; column-count: 2; column-gap: 10mm; }
+    .skills-list li { margin: 0 0 1.2mm; padding: 0; color: #4f545a; }
+  `;
+
+  const name = data.name || "Your Name";
+  const profession = data.experience?.[0]?.title || "Professional Title";
+  const contact = data.contact || {};
+  const summary = data.summary || "";
+  const experience = data.experience || [];
+  const education = data.education || [];
+  const skills = data.skills || [];
+  const contactUrl =
+    typeof getContactLinkUrl === "function"
+      ? getContactLinkUrl(contact)
+      : contact.link || contact.behance || "";
+  const contactText = contact.link || contact.behance || "Portfolio";
+  const contactItems = [];
+  if (contact.email)
+    contactItems.push(`<a href="mailto:${contact.email}">${contact.email}</a>`);
+  if (contact.phone) contactItems.push(`<span>${contact.phone}</span>`);
+  if (contact.location) contactItems.push(`<span>${contact.location}</span>`);
+  if (contactUrl)
+    contactItems.push(
+      `<a href="${contactUrl}" target="_blank">${contactText}</a>`,
+    );
+
+  const experienceHtml = experience
+    .map(
+      (exp) =>
+        `<div class="experience-item"><div class="item-header"><strong>${exp.title || "Position Title"}</strong>${exp.dates ? `<span class="dates">, ${exp.dates}</span>` : ""}</div><span class="company">${exp.company || "Company, City"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`,
+    )
+    .join("");
+  const educationHtml = education
+    .map(
+      (edu) =>
+        `<div class="education-item"><div class="item-header"><strong>${edu.degree || "Degree"}</strong>${edu.dates ? `<span class="dates">, ${edu.dates}</span>` : ""}</div><span class="institution">${edu.institution || "Institution"}</span></div>`,
+    )
+    .join("");
+  const skillsHtml = skills.length
+    ? `<ul class="skills-list">${skills.map((skill) => `<li>${skill}</li>`).join("")}</ul>`
+    : "";
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${name} - Resume</title><style>${styles}</style></head><body><div class="page"><div class="header"><h1>${name}</h1>${profession ? `<div class="profession-title">${profession}</div>` : ""}</div>${contactItems.length ? `<div class="section"><h2>Contact</h2><div class="contact-info">${contactItems.join(" | ")}</div></div>` : ""}${summary ? `<div class="section"><h2>Summary</h2><p>${summary}</p></div>` : ""}${experience.length ? `<div class="section"><h2>Experience</h2>${experienceHtml}</div>` : ""}${education.length ? `<div class="section"><h2>Education</h2>${educationHtml}</div>` : ""}${skills.length ? `<div class="section"><h2>Skills</h2>${skillsHtml}</div>` : ""}</div></body></html>`;
+};
+
+// Template 4: Minimalist Designer - structured header, timeline rows, rules, and skill bars inspired by reference 2
+const createResumeHtml_Executive = (data) => {
+  const styles = `
+    @page { size: A4; margin: 15mm 18mm 13mm; }
+    body { margin: 0; padding: 0; background: #fff; color: #34383e; font-family: Arial, Helvetica, sans-serif; font-size: 8.8pt; line-height: 1.42; }
+    .page { box-sizing: border-box; min-height: auto; }
+    .top { display: grid; grid-template-columns: 1fr 54mm; gap: 10mm; align-items: start; margin-bottom: 8mm; }
+    h1 { margin: 0; color: #2f3338; font-size: 24pt; line-height: 1.02; font-weight: 900; letter-spacing: 1px; text-transform: uppercase; }
+    .profession-title { margin-top: 4mm; color: #3c4046; font-size: 9.2pt; font-weight: 700; letter-spacing: 0.9px; text-transform: uppercase; }
+    .contact-info { color: #4f545a; font-size: 8pt; line-height: 1.65; }
+    .contact-row { display: grid; grid-template-columns: 6mm 1fr; gap: 2mm; align-items: center; }
+    .contact-icon { color: #222; font-size: 8.5pt; text-align: center; }
+    .contact-info a { color: #4f545a; text-decoration: none; }
+    .rule { position: relative; height: 1px; background: #bbb; margin: 0 0 4mm; }
+    .rule::before { content: ''; position: absolute; left: 0; top: -1px; width: 12mm; height: 2px; background: #2d3035; }
+    .section { margin-bottom: 5mm; page-break-inside: avoid; break-inside: avoid; }
+    h2 { margin: 0 0 3mm; color: #2f3338; font-size: 12pt; font-weight: 900; letter-spacing: 2.8px; text-transform: uppercase; page-break-after: avoid; break-after: avoid; }
+    p { margin: 0; color: #62676e; }
+    .timeline-item { display: grid; grid-template-columns: 26mm 1fr; gap: 8mm; margin-bottom: 5.5mm; page-break-inside: avoid; break-inside: avoid; }
+    .dates { color: #35393e; font-size: 8.4pt; font-weight: 800; }
+    .item-title { color: #34383e; font-size: 9.3pt; font-weight: 900; letter-spacing: 0.7px; text-transform: uppercase; }
+    .company, .institution { display: block; color: #4c5157; font-size: 8.4pt; font-weight: 700; margin: 0.4mm 0 1.4mm; }
+    ul { margin: 1.4mm 0 0; padding-left: 4.2mm; color: #62676e; }
+    li { margin-bottom: 0.8mm; }
+    .bottom-grid { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 10mm; }
+    .compact-item { display: grid; grid-template-columns: 24mm 1fr; gap: 8mm; margin-bottom: 4.2mm; page-break-inside: avoid; break-inside: avoid; }
+    .skills-list { list-style: none; margin: 0; padding: 0; }
+    .skills-list li { margin-bottom: 1.9mm; font-size: 8.8pt; }
+  `;
+
+  const name = data.name || "Your Name";
+  const profession = data.experience?.[0]?.title || "Professional Title";
+  const contact = data.contact || {};
+  const summary = data.summary || "";
+  const experience = data.experience || [];
+  const education = data.education || [];
+  const skills = data.skills || [];
+  const contactUrl =
+    typeof getContactLinkUrl === "function"
+      ? getContactLinkUrl(contact)
+      : contact.link || contact.behance || "";
+  const contactText = contact.link || contact.behance || "yourdomainname.com";
+  const contactRows = [];
+  if (contact.phone)
+    contactRows.push(
+      `<div class="contact-row"><span class="contact-icon">☎</span><span>${contact.phone}</span></div>`,
+    );
+  if (contact.email)
+    contactRows.push(
+      `<div class="contact-row"><span class="contact-icon">✉</span><a href="mailto:${contact.email}">${contact.email}</a></div>`,
+    );
+  if (contactUrl)
+    contactRows.push(
+      `<div class="contact-row"><span class="contact-icon">↗</span><a href="${contactUrl}" target="_blank">${contactText}</a></div>`,
+    );
+  if (contact.location)
+    contactRows.push(
+      `<div class="contact-row"><span class="contact-icon">●</span><span>${contact.location}</span></div>`,
+    );
+
+  const experienceHtml = experience
+    .map(
+      (exp) =>
+        `<div class="timeline-item"><div class="dates">${exp.dates || "Dates"}</div><div><div class="item-title">${exp.title || "Job Title"}</div><span class="company">${exp.company || "Company Name Here"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div></div>`,
+    )
+    .join("");
+  const educationHtml = education
+    .map(
+      (edu) =>
+        `<div class="compact-item"><div class="dates">${edu.dates || "Year"}</div><div><div class="item-title">${edu.degree || "Degree"}</div><span class="institution">${edu.institution || "Institution"}</span></div></div>`,
+    )
+    .join("");
+  const skillsHtml = skills.length
+    ? `<ul class="skills-list">${skills.map((skill) => `<li>${skill}</li>`).join("")}</ul>`
+    : "";
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${name} - Resume</title><style>${styles}</style></head><body><div class="page"><div class="top"><div><h1>${name}</h1>${profession ? `<div class="profession-title">${profession}</div>` : ""}</div><div class="contact-info">${contactRows.join("")}</div></div><div class="rule"></div>${summary ? `<div class="section"><h2>About Me</h2><p>${summary}</p></div><div class="rule"></div>` : ""}${experience.length ? `<div class="section"><h2>Experience</h2>${experienceHtml}</div><div class="rule"></div>` : ""}<div class="bottom-grid">${education.length ? `<div class="section"><h2>Education</h2>${educationHtml}</div>` : ""}${skills.length ? `<div class="section"><h2>Expertise</h2>${skillsHtml}</div>` : ""}</div></div></body></html>`;
+};
+
+// Template 5: Editorial Classic - clean lined document layout inspired by reference 3
+const createResumeHtml_Blueprint = (data) => {
+  const styles = `
+    @page { size: A4; margin: 15mm 16mm 14mm; }
+    body { margin: 0; padding: 0; background: #fff; color: #23272b; font-family: Arial, Helvetica, sans-serif; font-size: 8.2pt; line-height: 1.38; }
+    .page { box-sizing: border-box; min-height: auto; }
+    .header { margin-bottom: 8mm; }
+    h1 { margin: 0 0 1.5mm; color: #111; font-size: 17pt; line-height: 1; font-weight: 900; letter-spacing: 3.2px; text-transform: uppercase; }
+    .contact-info { color: #4e5358; font-size: 8.2pt; }
+    .contact-info a { color: #4e5358; text-decoration: none; }
+    .section { margin-bottom: 8.2mm; page-break-inside: avoid; break-inside: avoid; }
+    h2 { display: flex; align-items: center; gap: 4mm; margin: 0 0 4.2mm; color: #1f2327; font-size: 8.7pt; font-weight: 900; letter-spacing: 3px; text-transform: uppercase; page-break-after: avoid; break-after: avoid; }
+    h2::after { content: ''; flex: 1; border-top: 1.4px solid #333; }
+    p { margin: 0; color: #42474c; }
+    .experience-item, .education-item { margin-bottom: 4mm; page-break-inside: avoid; break-inside: avoid; }
+    .item-header { display: flex; justify-content: space-between; gap: 10mm; align-items: baseline; margin-bottom: 0.7mm; }
+    .item-header strong { color: #1f2327; font-size: 8.8pt; font-weight: 900; text-transform: uppercase; }
+    .dates { flex: 0 0 auto; color: #1f2327; font-size: 8pt; font-weight: 900; text-align: right; }
+    .company, .institution { display: block; color: #252a2f; font-size: 8.2pt; font-weight: 800; margin-bottom: 1.6mm; }
+    ul { margin: 1.2mm 0 0 4mm; padding: 0; color: #42474c; }
+    li { margin-bottom: 1mm; padding-left: 1.2mm; }
+    .skills-list { list-style: none; margin: 0; padding: 0; }
+    .skills-list li { margin: 0 0 1.1mm; padding: 0; }
+  `;
+
+  const name = data.name || "Your Name";
+  const contact = data.contact || {};
+  const summary = data.summary || "";
+  const experience = data.experience || [];
+  const education = data.education || [];
+  const skills = data.skills || [];
+  const contactUrl =
+    typeof getContactLinkUrl === "function"
+      ? getContactLinkUrl(contact)
+      : contact.link || contact.behance || "";
+  const contactText = contact.link || contact.behance || "Portfolio";
+  const contactItems = [];
+  if (contact.location) contactItems.push(`<span>${contact.location}</span>`);
+  if (contact.phone) contactItems.push(`<span>${contact.phone}</span>`);
+  if (contact.email)
+    contactItems.push(`<a href="mailto:${contact.email}">${contact.email}</a>`);
+  if (contactUrl)
+    contactItems.push(
+      `<a href="${contactUrl}" target="_blank">${contactText}</a>`,
+    );
+
+  const experienceHtml = experience
+    .map(
+      (exp) =>
+        `<div class="experience-item"><div class="item-header"><strong>${exp.title || "Job Title"}</strong><span class="dates">${exp.dates || "mm/yyyy – mm/yyyy"}</span></div><span class="company">${exp.company || "Company name (City, Country)"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`,
+    )
+    .join("");
+  const educationHtml = education
+    .map(
+      (edu) =>
+        `<div class="education-item"><div class="item-header"><strong>${edu.degree || "Degree"}</strong><span class="dates">${edu.dates || "mm/yyyy – mm/yyyy"}</span></div><span class="institution">${edu.institution || "Name of the institution or university"}</span></div>`,
+    )
+    .join("");
+  const skillsHtml = skills.length
+    ? `<ul class="skills-list">${skills.map((skill) => `<li><strong>${skill}</strong></li>`).join("")}</ul>`
+    : "";
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${name} - Resume</title><style>${styles}</style></head><body><div class="page"><div class="header"><h1>${name}</h1><div class="contact-info">${contactItems.join(" • ")}</div></div>${summary ? `<div class="section"><h2>Professional Profile</h2><p>${summary}</p></div>` : ""}${experience.length ? `<div class="section"><h2>Work Experience</h2>${experienceHtml}</div>` : ""}${education.length ? `<div class="section"><h2>Education</h2>${educationHtml}</div>` : ""}${skills.length ? `<div class="section"><h2>Skills</h2>${skillsHtml}</div>` : ""}</div></body></html>`;
 };
 
 // Template 4: Creative
@@ -389,9 +621,8 @@ const createResumeHtml_Creative = (data) => {
     p { margin-top: 0; margin-bottom: 5px; } /* Reduced margin */
 
     .skills-section { margin-top: 15px; } /* Further reduced margin */
-    .skills-list { list-style: none; padding: 0; margin: 6px 0 0 0; column-count: 3; column-gap: 20px; } /* Reduced margin & gap */
-    .skills-list li { margin-bottom: 2px; font-size: 9.5pt; padding-left: 0; } /* Size 9pt -> 9.5pt */
-     .skills-list li::before { content: none; } /* No bullets for skills */
+    .skills-list { list-style: none; padding: 0; margin: 6px 0 0 0; display: flex; flex-wrap: wrap; gap: 6px 12px; }
+    .skills-list li { margin: 0; font-size: 9.5pt; padding: 3px 10px; background: #f0f4f8; border-radius: 4px; color: #333; }
 
   `;
 
@@ -417,7 +648,9 @@ const createResumeHtml_Creative = (data) => {
   if (contact.phone) contactItems.push(`<span>${contact.phone}</span>`);
   if (contact.location) contactItems.push(`<span>${contact.location}</span>`);
   if (contactUrl) {
-    contactItems.push(`<a href="${contactUrl}" target="_blank">${contactText}</a>`);
+    contactItems.push(
+      `<a href="${contactUrl}" target="_blank">${contactText}</a>`,
+    );
   }
   const contactHtml =
     contactItems.length > 0
@@ -876,14 +1109,9 @@ app.post("/api/optimize-resume", async (req, res) => {
     try {
       console.log("[/api/optimize-resume] Parsing DeepInfra response...");
       optimizedResumeJson = JSON.parse(completion.choices[0].message.content);
-      console.log("[/api/optimize-resume] DeepInfra response parsed successfully.");
-
-      // *** ADD SANITIZATION STEP ***
-      console.log("[/api/optimize-resume] Sanitizing JSON response...");
-      const sanitizedJson = sanitizeResumeJson(optimizedResumeJson);
-      console.log("[/api/optimize-resume] Sanitization complete.");
-
-      res.json({ optimizedResumeJson: sanitizedJson }); // Send sanitized JSON
+      console.log(
+        "[/api/optimize-resume] DeepInfra response parsed successfully.",
+      );
     } catch (parseError) {
       console.error(
         "Failed to parse DeepInfra JSON response:",
@@ -891,6 +1119,13 @@ app.post("/api/optimize-resume", async (req, res) => {
       );
       throw new Error("AI failed to return valid JSON structure.");
     }
+
+    // *** ADD SANITIZATION STEP ***
+    console.log("[/api/optimize-resume] Sanitizing JSON response...");
+    const sanitizedJson = sanitizeResumeJson(optimizedResumeJson);
+    console.log("[/api/optimize-resume] Sanitization complete.");
+
+    res.json({ optimizedResumeJson: sanitizedJson }); // Send sanitized JSON
   } catch (error) {
     console.error("[/api/optimize-resume] Error during optimization:", error);
     res
@@ -919,6 +1154,15 @@ app.post("/api/generate-pdf", async (req, res) => {
       case "creative":
         htmlContent = createResumeHtml_Creative(resumeData);
         break;
+      case "compact":
+        htmlContent = createResumeHtml_Compact(resumeData);
+        break;
+      case "executive":
+        htmlContent = createResumeHtml_Executive(resumeData);
+        break;
+      case "blueprint":
+        htmlContent = createResumeHtml_Blueprint(resumeData);
+        break;
       default:
         htmlContent = createResumeHtml_Classic(resumeData);
         break;
@@ -927,26 +1171,27 @@ app.post("/api/generate-pdf", async (req, res) => {
     const browser = await puppeteer.launch(getPuppeteerLaunchOptions());
     console.log("[/api/generate-pdf] Puppeteer launched. Creating new page...");
     const page = await browser.newPage();
-    console.log("[/api/generate-pdf] Setting page content...");
-    await page.setContent(htmlContent, { waitUntil: "networkidle0" });
-    await page.emulateMediaType("print");
-    console.log("[/api/generate-pdf] Generating PDF buffer...");
-    const pdfBuffer = await page.pdf({
-      format: "A4",
-      printBackground: true,
-      margin: { top: "0", bottom: "0", left: "0", right: "0" },
-      preferCSSPageSize: true,
-    });
-    console.log("[/api/generate-pdf] PDF buffer generated. Closing browser...");
+
+    console.log("[/api/generate-pdf] Generating PDF with smart pagination...");
+    const { pagination, pdfBuffer } = await createPdfBufferFromHtml(
+      page,
+      htmlContent,
+    );
+
+    console.log(
+      "[/api/generate-pdf] Pagination result:",
+      JSON.stringify({
+        pages: pagination.finalMetrics.pages,
+        scale: pagination.scale,
+        balancedLastPage: pagination.balancedLastPage,
+        lastPageUsage:
+          (pagination.finalMetrics.lastPageUsage * 100).toFixed(1) + "%",
+      }),
+    );
+
+    console.log("[/api/generate-pdf] Closing browser...");
     await browser.close();
-    console.log(
-      "[/api/generate-pdf] Browser closed. Encoding PDF to base64...",
-    );
     const pdfBase64String = Buffer.from(pdfBuffer).toString("base64");
-    console.log(
-      "Generated PDF Base64 (first 100 chars):",
-      pdfBase64String.substring(0, 100),
-    );
     console.log("[/api/generate-pdf] Sending response to client...");
     res.json({ pdfBase64: pdfBase64String });
   } catch (error) {
