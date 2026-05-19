@@ -1,0 +1,20 @@
+{
+  "name": "resume-optimizer-server",
+  "version": "1.0.0",
+  "description": "Backend server for Resume Optimizer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "render-postbuild": "npx puppeteer browsers install chrome"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "groq-sdk": "^0.20.1",
+    "puppeteer": "^24.7.2"
+  },
+  "author": "",
+  "license": "ISC"
+}
