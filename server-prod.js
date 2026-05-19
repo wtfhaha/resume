@@ -9,7 +9,7 @@ const DEEPINFRA_API_URL =
   process.env.DEEPINFRA_API_URL || "https://api.deepinfra.com/v1/openai";
 const DEEPINFRA_API_KEY = process.env.DEEPINFRA_API_KEY;
 const DEEPINFRA_MODEL =
-  process.env.DEEPINFRA_MODEL || "deepseek-ai/DeepSeek-V4-Flash";
+  process.env.DEEPINFRA_MODEL || "deepseek-ai/DeepSeek-V4-Pro";
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -47,38 +47,57 @@ const validateApiKey = () => {
   return true;
 };
 
+// Add retry mechanism to DeepInfra API call
 const deepInfraChatCompletion = async ({
   messages,
   model = DEEPINFRA_MODEL,
   temperature = 0.7,
   max_tokens = 4096,
+  retries = 3,
+  retryDelay = 2000,
 }) => {
   if (typeof fetch === "undefined") {
     throw new Error("Global fetch is not available in this Node runtime.");
   }
 
-  const response = await fetch(`${DEEPINFRA_API_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature,
-      max_tokens,
-    }),
-  });
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(`${DEEPINFRA_API_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens,
+        }),
+      });
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(
-      `DeepInfra API error ${response.status}: ${response.statusText} - ${errorBody}`,
-    );
+      if (!response.ok) {
+        const errorBody = await response.text();
+        if (response.status === 429 && attempt < retries) {
+          console.warn(
+            `DeepInfra API rate limit hit. Retrying in ${retryDelay}ms... (Attempt ${attempt} of ${retries})`
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          continue;
+        }
+        throw new Error(
+          `DeepInfra API error ${response.status}: ${response.statusText} - ${errorBody}`
+        );
+      }
+
+      return response.json();
+    } catch (error) {
+      if (attempt === retries) {
+        console.error("DeepInfra API call failed after maximum retries:", error);
+        throw error;
+      }
+    }
   }
-
-  return response.json();
 };
 
 const normalizeContactUrl = (url) => {

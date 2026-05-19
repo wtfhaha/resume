@@ -11,7 +11,7 @@ const DEEPINFRA_API_URL =
   process.env.DEEPINFRA_API_URL || "https://api.deepinfra.com/v1/openai";
 const DEEPINFRA_API_KEY = process.env.DEEPINFRA_API_KEY;
 const DEEPINFRA_MODEL =
-  process.env.DEEPINFRA_MODEL || "deepseek-ai/DeepSeek-V4-Flash";
+  process.env.DEEPINFRA_MODEL || "deepseek-ai/DeepSeek-V4-Pro";
 
 // dotenv.config(); // No longer loading from .env file
 
@@ -40,33 +40,51 @@ const deepInfraChatCompletion = async ({
   model = DEEPINFRA_MODEL,
   temperature = 0.7,
   max_tokens = 4096,
+  retries = 3,
+  retryDelay = 2000,
 }) => {
   if (typeof fetch === "undefined") {
     throw new Error("Global fetch is not available in this Node runtime.");
   }
 
-  const response = await fetch(`${DEEPINFRA_API_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature,
-      max_tokens,
-    }),
-  });
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(`${DEEPINFRA_API_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens,
+        }),
+      });
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(
-      `DeepInfra API error ${response.status}: ${response.statusText} - ${errorBody}`,
-    );
+      if (!response.ok) {
+        const errorBody = await response.text();
+        if (response.status === 429 && attempt < retries) {
+          console.warn(
+            `DeepInfra API rate limit hit. Retrying in ${retryDelay}ms... (Attempt ${attempt} of ${retries})`
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          continue;
+        }
+        throw new Error(
+          `DeepInfra API error ${response.status}: ${response.statusText} - ${errorBody}`
+        );
+      }
+
+      return response.json();
+    } catch (error) {
+      if (attempt === retries) {
+        console.error("DeepInfra API call failed after maximum retries:", error);
+        throw error;
+      }
+    }
   }
-
-  return response.json();
 };
 
 // --- Sanitization Function ---
@@ -299,10 +317,9 @@ const createResumeHtml_Modern = (data) => {
 // Template 2: Classic Single-Column
 const createResumeHtml_Classic = (data) => {
   const styles = `
-    @page { size: A4; margin: 15mm; }
-    @import url('https://fonts.googleapis.com/css2?family=Times+New+Roman&display=swap');
-    body { font-family: 'Times New Roman', serif; line-height: 1.3; color: #000; font-size: 10pt; } /* Size 9.5pt -> 10pt, line-height 1.2 -> 1.3 */
-    .page { width: 100%; margin: 0; box-sizing: border-box; background-color: #fff; }
+    @page { size: A4; margin: 15mm 18mm 13mm; }
+    body { margin: 0; padding: 0; background: #fff; color: #34383e; font-family: Arial, Helvetica, sans-serif; font-size: 8.8pt; line-height: 1.42; }
+    .page { box-sizing: border-box; min-height: auto; }
     .experience-item, .education-item { page-break-inside: avoid; break-inside: avoid; }
     .section { page-break-inside: avoid; break-inside: avoid; }
     h1 { text-align: center; margin: 0 0 1px 0; font-size: 15pt; font-weight: bold; text-transform: uppercase; } /* Reduced margin & font size */
@@ -573,7 +590,7 @@ const createResumeHtml_Blueprint = (data) => {
     )
     .join("");
   const skillsHtml = skills.length
-    ? `<ul class="skills-list">${skills.map((skill) => `<li><strong>${skill}</strong></li>`).join("")}</ul>`
+    ? `<ul class="skills-list">${skills.map((skill) => `<li>${skill}</li>`).join("")}</ul>`
     : "";
 
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${name} - Resume</title><style>${styles}</style></head><body><div class="page"><div class="header"><h1>${name}</h1><div class="contact-info">${contactItems.join(" • ")}</div></div>${summary ? `<div class="section"><h2>Professional Profile</h2><p>${summary}</p></div>` : ""}${experience.length ? `<div class="section"><h2>Work Experience</h2>${experienceHtml}</div>` : ""}${education.length ? `<div class="section"><h2>Education</h2>${educationHtml}</div>` : ""}${skills.length ? `<div class="section"><h2>Skills</h2>${skillsHtml}</div>` : ""}</div></body></html>`;
