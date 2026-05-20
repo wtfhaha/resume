@@ -330,8 +330,8 @@ const createResumeHtml_Classic = (data) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Template: Creative  — split header (name left / contact right), slate accent
 // ─────────────────────────────────────────────────────────────────────────────
-const createResumeHtml_Creative = (data) => {
-  const ACCENT = "#2d4a6e";
+const createResumeHtml_Creative = (data, accentColor = "#2d4a6e") => {
+  const ACCENT = accentColor;
   const css = `
     @page { size: A4; margin: 18mm 22mm 16mm; }
     * { box-sizing: border-box; }
@@ -518,7 +518,8 @@ const createResumeHtml_Compact = (data) => {
 // The executive feel comes from the thick accent border, navy h2, and
 // orange company name accent rather than background hacks.
 // ─────────────────────────────────────────────────────────────────────────────
-const createResumeHtml_Executive = (data) => {
+const createResumeHtml_Executive = (data, accentColor = "#ff8a2a") => {
+  const ACCENT = accentColor;
   const css = `
     @page { size: A4; margin: 18mm 22mm 16mm; }
     * { box-sizing: border-box; }
@@ -530,7 +531,7 @@ const createResumeHtml_Executive = (data) => {
            page-break-inside: avoid; break-inside: avoid; }
     .hdr h1   { margin: 0 0 2px; font-size: 22pt; font-weight: 900;
                 text-transform: uppercase; letter-spacing: 2px; color: #1b2a3b; }
-    .hdr .prof { font-size: 10pt; color: #ff8a2a; font-weight: 700;
+    .hdr .prof { font-size: 10pt; color: ${ACCENT}; font-weight: 700;
                  text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; }
     .hdr .cbar { font-size: 8.5pt; color: #555; }
     .hdr .cbar a { color: #555; text-decoration: none; }
@@ -546,7 +547,7 @@ const createResumeHtml_Executive = (data) => {
     .ititle { font-weight: bold; font-size: 9.5pt; color: #1b2a3b;
               display: block; margin-bottom: 1px; }
     .irow   { display: table; width: 100%; margin-bottom: 3px; }
-    .isub   { display: table-cell; font-style: italic; font-size: 9pt; color: #ff8a2a; }
+    .isub   { display: table-cell; font-style: italic; font-size: 9pt; color: ${ACCENT}; }
     .idate  { display: table-cell; white-space: nowrap; text-align: right;
               padding-left: 10px; font-size: 8.5pt; color: #666; }
     ul { margin: 3px 0 0; padding-left: 14px; }
@@ -556,7 +557,7 @@ const createResumeHtml_Executive = (data) => {
     .sk     { list-style: none; padding: 0; margin: 0; column-count: 2; column-gap: 14px; }
     .sk li  { margin-bottom: 2px; font-size: 9pt; padding-left: 11px; position: relative; }
     .sk li::before { content: "›"; position: absolute; left: 0;
-                     color: #ff8a2a; font-weight: bold; font-size: 10pt; }
+                     color: ${ACCENT}; font-weight: bold; font-size: 10pt; }
   `;
 
   const name    = esc(data.name || "Your Name");
@@ -962,7 +963,7 @@ app.post("/api/optimize-resume", async (req, res) => {
 // Generate PDF Endpoint (Accepts JSON & templateName)
 app.post("/api/generate-pdf", async (req, res) => {
   console.log("[/api/generate-pdf] Received request");
-  const { resumeData, templateName = "classic" } = req.body;
+  const { resumeData, templateName = "classic", accentColor } = req.body;
   if (!resumeData) {
     console.log("[/api/generate-pdf] Bad request: Missing resumeData");
     return res
@@ -977,13 +978,13 @@ app.post("/api/generate-pdf", async (req, res) => {
         htmlContent = createResumeHtml_Classic(resumeData);
         break;
       case "creative":
-        htmlContent = createResumeHtml_Creative(resumeData);
+        htmlContent = createResumeHtml_Creative(resumeData, accentColor);
         break;
       case "compact":
         htmlContent = createResumeHtml_Compact(resumeData);
         break;
       case "executive":
-        htmlContent = createResumeHtml_Executive(resumeData);
+        htmlContent = createResumeHtml_Executive(resumeData, accentColor);
         break;
       case "blueprint":
         htmlContent = createResumeHtml_Blueprint(resumeData);
