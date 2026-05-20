@@ -24,6 +24,6 @@ if [ -n "$CHROME_EXECUTABLE" ]; then
   export PUPPETEER_EXECUTABLE_PATH="$CHROME_EXECUTABLE"
   echo "PUPPETEER_EXECUTABLE_PATH set to: $PUPPETEER_EXECUTABLE_PATH"
 else
-  echo "Error: Could not determine Chrome executable path from puppeteer install output."
-  exit 1 # Exit with an error to fail the Render build
+  echo "Warning: Could not determine Chrome executable path from puppeteer install output."
+  echo "Continuing without PUPPETEER_EXECUTABLE_PATH; Puppeteer will use its default browser path if available."
 fi

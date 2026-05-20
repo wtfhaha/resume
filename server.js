@@ -1,10 +1,17 @@
 // Load environment variables from .env file in the server directory
 require("dotenv").config();
 
+const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
-const { Groq } = require("groq-sdk");
 const puppeteer = require("puppeteer");
+require("dotenv").config();
+
+const DEEPINFRA_API_URL =
+  process.env.DEEPINFRA_API_URL || "https://api.deepinfra.com/v1/openai";
+const DEEPINFRA_API_KEY = process.env.DEEPINFRA_API_KEY;
+const DEEPINFRA_MODEL =
+  process.env.DEEPINFRA_MODEL || "deepseek-ai/DeepSeek-V4-Pro";
 
 // dotenv.config(); // No longer loading from .env file
 
@@ -13,6 +20,72 @@ const port = process.env.PORT || 5001;
 
 app.use(cors());
 app.use(express.json());
+
+// --- Helper: Validate API Key ---
+const validateApiKey = () => {
+  if (
+    !DEEPINFRA_API_KEY ||
+    DEEPINFRA_API_KEY === "YOUR_DEEPINFRA_API_KEY_HERE"
+  ) {
+    console.error("ERROR: DEEPINFRA_API_KEY is not configured properly");
+    console.error("Please set your actual DeepInfra API key in server/.env");
+    return false;
+  }
+  return true;
+};
+
+// --- Helper: Call DeepInfra Chat API ---
+const deepInfraChatCompletion = async ({
+  messages,
+  model = DEEPINFRA_MODEL,
+  temperature = 0.7,
+  max_tokens = 4096,
+  retries = 3,
+  retryDelay = 2000,
+}) => {
+  if (typeof fetch === "undefined") {
+    throw new Error("Global fetch is not available in this Node runtime.");
+  }
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(`${DEEPINFRA_API_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        if (response.status === 429 && attempt < retries) {
+          console.warn(
+            `DeepInfra API rate limit hit. Retrying in ${retryDelay}ms... (Attempt ${attempt} of ${retries})`
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          continue;
+        }
+        throw new Error(
+          `DeepInfra API error ${response.status}: ${response.statusText} - ${errorBody}`
+        );
+      }
+
+      return response.json();
+    } catch (error) {
+      if (attempt === retries) {
+        console.error("DeepInfra API call failed after maximum retries:", error);
+        throw error;
+      }
+    }
+  }
+};
 
 // --- Sanitization Function ---
 const sanitizeResumeJson = (data) => {
@@ -97,9 +170,528 @@ const getContactLinkUrl = (contact) => {
   return normalizeContactUrl(linkValue);
 };
 
-// --- TEMPLATE FUNCTIONS ---
+const getPuppeteerLaunchOptions = () => {
+  const launchOptions = {
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+    ],
+  };
 
-// Template 1: Modern Multi-Column
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
+  if (executablePath) {
+    try {
+      fs.accessSync(executablePath, fs.constants.X_OK);
+      launchOptions.executablePath = executablePath;
+      console.log(
+        "Using configured Puppeteer executable path:",
+        executablePath,
+      );
+    } catch (accessError) {
+      console.warn(
+        `Configured Puppeteer executable path is not usable: ${executablePath}. Falling back to Puppeteer default browser path.`,
+        accessError.message,
+      );
+    }
+  } else {
+    console.log(
+      "No PUPPETEER_EXECUTABLE_PATH configured; using Puppeteer default browser path.",
+    );
+  }
+
+  return launchOptions;
+};
+
+// PDF generation — no artificial scaling or page balancing.
+// Content renders at natural size so there are no huge empty gaps.
+const createPdfBufferFromHtml = async (page, htmlContent) => {
+  await page.setContent(htmlContent, { waitUntil: "networkidle0" });
+  await page.evaluate(() =>
+    document.fonts && document.fonts.ready ? document.fonts.ready : undefined,
+  );
+
+  const pdfBuffer = await page.pdf({
+    format: "A4",
+    printBackground: true,
+    margin: { top: "0", bottom: "0", left: "0", right: "0" },
+    preferCSSPageSize: true,
+  });
+
+  return {
+    pdfBuffer,
+    pagination: { scale: 1, finalMetrics: { pages: 1, lastPageUsage: 1 } },
+  };
+};
+
+// --- TEMPLATE FUNCTIONS (v2) ---
+// Puppeteer PDF rules observed throughout:
+//   • All sizes in pt/mm — never rem/em
+//   • page-break-inside:avoid + break-inside:avoid on every item
+//   • page-break-after:avoid  + break-after:avoid  on every heading
+//   • No @import for fonts — system fonts only (Arial, Georgia, Helvetica)
+//   • For full-bleed headers: negative-margin trick against @page margins
+//   • For repeating sidebars: position:fixed (Puppeteer repeats on every page)
+//   • float-based dates with overflow:hidden parent (more reliable than flex in body)
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+const esc = (s) => String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const contactParts = (contact, contactUrl, contactText) => {
+  const p = [];
+  if (contact.location) p.push(esc(contact.location));
+  if (contact.phone)    p.push(esc(contact.phone));
+  if (contact.email)    p.push(`<a href="mailto:${esc(contact.email)}">${esc(contact.email)}</a>`);
+  if (contactUrl)       p.push(`<a href="${esc(contactUrl)}" target="_blank">${esc(contactText)}</a>`);
+  return p;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Template: Classic  — clean single-column, ATS-safe
+// ─────────────────────────────────────────────────────────────────────────────
+const createResumeHtml_Classic = (data) => {
+  const css = `
+    @page { size: A4; margin: 20mm 22mm 18mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; font-family: Arial, Helvetica, sans-serif;
+           font-size: 9pt; line-height: 1.42; color: #1a1a1a; background: #fff; }
+    /* ── header ── */
+    .hdr       { text-align: center; margin-bottom: 9px;
+                 page-break-inside: avoid; break-inside: avoid; }
+    .hdr h1    { margin: 0; font-size: 19pt; font-weight: 900; text-transform: uppercase;
+                 letter-spacing: 2px; color: #111; }
+    .hdr .prof { font-size: 9.5pt; color: #555; margin: 3px 0 5px; }
+    .hdr .cbar { font-size: 8.5pt; color: #444; }
+    .hdr .cbar a { color: #444; text-decoration: none; }
+    /* ── sections ── */
+    h2 { font-size: 9.5pt; font-weight: 900; text-transform: uppercase;
+         letter-spacing: 1.2px; border-bottom: 1.5px solid #111;
+         margin: 11px 0 5px; padding-bottom: 2px;
+         page-break-after: avoid; break-after: avoid; }
+    .sec { margin-bottom: 8px; }
+    /* ── items: title on its own line; company + date share a row ── */
+    .item   { margin-bottom: 8px; page-break-inside: avoid; break-inside: avoid; }
+    .ititle { font-weight: bold; font-size: 9.5pt; display: block; margin-bottom: 1px; }
+    .irow   { display: table; width: 100%; margin-bottom: 3px; }
+    .isub   { display: table-cell; font-style: italic; font-size: 9pt; color: #444; }
+    .idate  { display: table-cell; white-space: nowrap; text-align: right;
+              padding-left: 10px; font-size: 8.5pt; color: #555; }
+    ul      { margin: 3px 0 0; padding-left: 14px; }
+    li      { margin-bottom: 2px; font-size: 9pt; }
+    p       { margin: 0 0 4px; font-size: 9pt; }
+    /* ── skills ── */
+    .sk         { list-style: none; padding: 0; margin: 0;
+                  column-count: 2; column-gap: 15px; }
+    .sk li      { margin-bottom: 2px; font-size: 9pt; }
+    .sk li::before { content: "• "; }
+  `;
+
+  const name   = esc(data.name || "Your Name");
+  const prof   = data.experience?.[0]?.title ? esc(data.experience[0].title) : "";
+  const contact = data.contact || {};
+  const url    = getContactLinkUrl(contact);
+  const cparts = contactParts(contact, url, contact.link || contact.behance || "Portfolio");
+
+  const expHtml = (data.experience || []).map(exp => `
+    <div class="item">
+      <span class="ititle">${esc(exp.title)}</span>
+      <div class="irow">
+        <span class="isub">${esc(exp.company)}</span>
+        <span class="idate">${esc(exp.dates)}</span>
+      </div>
+      <ul>${(exp.details || []).map(d => `<li>${esc(d)}</li>`).join("")}</ul>
+    </div>`).join("");
+
+  const eduHtml = (data.education || []).map(edu => `
+    <div class="item">
+      <span class="ititle">${esc(edu.degree)}</span>
+      <div class="irow">
+        <span class="isub">${esc(edu.institution)}</span>
+        <span class="idate">${esc(edu.dates)}</span>
+      </div>
+    </div>`).join("");
+
+  const skHtml = (data.skills || []).length
+    ? `<ul class="sk">${(data.skills || []).map(s => `<li>${esc(s)}</li>`).join("")}</ul>` : "";
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>${css}</style></head><body>
+  <div class="hdr">
+    <h1>${name}</h1>
+    ${prof ? `<div class="prof">${prof}</div>` : ""}
+    <div class="cbar">${cparts.join(" &nbsp;|&nbsp; ")}</div>
+  </div>
+  ${data.summary ? `<div class="sec"><h2>Summary</h2><p>${esc(data.summary)}</p></div>` : ""}
+  ${(data.experience||[]).length ? `<div class="sec"><h2>Experience</h2>${expHtml}</div>` : ""}
+  ${(data.education||[]).length  ? `<div class="sec"><h2>Education</h2>${eduHtml}</div>`  : ""}
+  ${(data.skills||[]).length     ? `<div class="sec"><h2>Skills</h2>${skHtml}</div>`      : ""}
+  </body></html>`;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Template: Creative  — split header (name left / contact right), slate accent
+// ─────────────────────────────────────────────────────────────────────────────
+const createResumeHtml_Creative = (data) => {
+  const ACCENT = "#2d4a6e";
+  const css = `
+    @page { size: A4; margin: 18mm 22mm 16mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; font-family: Arial, Helvetica, sans-serif;
+           font-size: 9pt; line-height: 1.44; color: #1e1e2e; background: #fff; }
+    /* ── header: name+profession left, contact right ── */
+    .hdr   { display: table; width: 100%; border-bottom: 3px solid ${ACCENT};
+             padding-bottom: 10px; margin-bottom: 11px;
+             page-break-inside: avoid; break-inside: avoid; }
+    .hdr-l { display: table-cell; vertical-align: bottom; }
+    .hdr-r { display: table-cell; vertical-align: bottom; text-align: right;
+             width: 40%; }
+    .hdr h1   { margin: 0 0 3px; font-size: 22pt; font-weight: 900;
+                text-transform: uppercase; letter-spacing: 1px; color: #111; }
+    .hdr .prof { font-size: 10pt; color: ${ACCENT}; font-weight: 700; margin: 0; }
+    .hdr .citem { font-size: 8pt; color: #555; line-height: 1.85; }
+    .hdr .citem a { color: #555; text-decoration: none; }
+    /* ── section headers: colored text + extending rule ── */
+    h2 { display: table; width: 100%;
+         font-size: 8.5pt; font-weight: 900; text-transform: uppercase;
+         letter-spacing: 2px; color: ${ACCENT};
+         margin: 12px 0 5px; padding: 0;
+         page-break-after: avoid; break-after: avoid; }
+    h2::before { content: attr(data-label); display: table-cell;
+                 white-space: nowrap; padding-right: 10px; }
+    h2::after  { content: ""; display: table-cell; width: 100%;
+                 border-bottom: 1px solid #c5d0de; vertical-align: middle; }
+    .sec { margin-bottom: 9px; }
+    /* ── items: title on its own line; company + date share a row ── */
+    .item   { margin-bottom: 7px; page-break-inside: avoid; break-inside: avoid; }
+    .ititle { font-weight: bold; font-size: 9.5pt; color: #111;
+              display: block; margin-bottom: 1px; }
+    .irow   { display: table; width: 100%; margin-bottom: 3px; }
+    .isub   { display: table-cell; font-style: italic; font-size: 9pt; color: ${ACCENT}; }
+    .idate  { display: table-cell; white-space: nowrap; text-align: right;
+              padding-left: 10px; font-size: 8.5pt; color: #666; }
+    ul { margin: 3px 0 0; padding-left: 14px; }
+    li { margin-bottom: 2px; font-size: 9pt; }
+    p  { margin: 0 0 4px; font-size: 9pt; }
+    /* ── skills 2-col ── */
+    .sk     { list-style: none; padding: 0; margin: 0; column-count: 2; column-gap: 14px; }
+    .sk li  { margin-bottom: 2px; font-size: 9pt; padding-left: 12px; position: relative; }
+    .sk li::before { content: "▸"; position: absolute; left: 0;
+                     color: ${ACCENT}; font-size: 8pt; top: 1px; }
+  `;
+
+  const h2     = (label) => `<h2 data-label="${esc(label)}"></h2>`;
+  const name   = esc(data.name || "Your Name");
+  const prof   = data.experience?.[0]?.title ? esc(data.experience[0].title) : "";
+  const contact = data.contact || {};
+  const url    = getContactLinkUrl(contact);
+  const urlTxt = esc(contact.link || contact.behance || "Portfolio");
+
+  const cHtml = [
+    contact.email    ? `<div class="citem"><a href="mailto:${esc(contact.email)}">${esc(contact.email)}</a></div>` : "",
+    contact.phone    ? `<div class="citem">${esc(contact.phone)}</div>` : "",
+    contact.location ? `<div class="citem">${esc(contact.location)}</div>` : "",
+    url              ? `<div class="citem"><a href="${esc(url)}">${urlTxt}</a></div>` : "",
+  ].filter(Boolean).join("");
+
+  const expHtml = (data.experience || []).map(exp => `
+    <div class="item">
+      <span class="ititle">${esc(exp.title)}</span>
+      <div class="irow">
+        <span class="isub">${esc(exp.company)}</span>
+        <span class="idate">${esc(exp.dates)}</span>
+      </div>
+      <ul>${(exp.details || []).map(d => `<li>${esc(d)}</li>`).join("")}</ul>
+    </div>`).join("");
+
+  const eduHtml = (data.education || []).map(edu => `
+    <div class="item">
+      <span class="ititle">${esc(edu.degree)}</span>
+      <div class="irow">
+        <span class="isub">${esc(edu.institution)}</span>
+        <span class="idate">${esc(edu.dates)}</span>
+      </div>
+    </div>`).join("");
+
+  const skHtml = (data.skills || []).length
+    ? `<ul class="sk">${(data.skills || []).map(s => `<li>${esc(s)}</li>`).join("")}</ul>` : "";
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>${css}</style></head><body>
+  <div class="hdr">
+    <div class="hdr-l">
+      <h1>${name}</h1>
+      ${prof ? `<div class="prof">${prof}</div>` : ""}
+    </div>
+    <div class="hdr-r">${cHtml}</div>
+  </div>
+  ${data.summary    ? `<div class="sec">${h2("Professional Summary")}<p>${esc(data.summary)}</p></div>` : ""}
+  ${(data.experience||[]).length ? `<div class="sec">${h2("Experience")}${expHtml}</div>` : ""}
+  ${(data.education||[]).length  ? `<div class="sec">${h2("Education")}${eduHtml}</div>`  : ""}
+  ${(data.skills||[]).length     ? `<div class="sec">${h2("Skills")}${skHtml}</div>`      : ""}
+  </body></html>`;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Template: Compact  — dense layout, name left / contact right, 3-col skills
+// ─────────────────────────────────────────────────────────────────────────────
+const createResumeHtml_Compact = (data) => {
+  const css = `
+    @page { size: A4; margin: 13mm 16mm 12mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; font-family: Arial, Helvetica, sans-serif;
+           font-size: 8.5pt; line-height: 1.32; color: #1e1e1e; background: #fff; }
+    /* ── header: name left, contact right ── */
+    .hdr        { overflow: hidden; margin-bottom: 6px; border-bottom: 2px solid #1e1e1e; padding-bottom: 5px; }
+    .hdr-left   { float: left; }
+    .hdr-right  { float: right; text-align: right; font-size: 8pt; color: #444; line-height: 1.65; }
+    .hdr-right a{ color: #444; text-decoration: none; }
+    .hdr h1     { margin: 0 0 1px; font-size: 17pt; font-weight: 900;
+                  text-transform: uppercase; letter-spacing: 1.5px; color: #111; }
+    .hdr .prof  { font-size: 8.5pt; color: #555; }
+    /* ── sections ── */
+    h2 { font-size: 8.5pt; font-weight: 900; text-transform: uppercase;
+         letter-spacing: 1.4px; border-bottom: 1px solid #1e1e1e;
+         margin: 9px 0 4px; padding-bottom: 1px;
+         page-break-after: avoid; break-after: avoid; }
+    .sec { margin-bottom: 7px; }
+    /* ── items: title on its own line; company + date share a row ── */
+    .item   { margin-bottom: 5px; page-break-inside: avoid; break-inside: avoid; }
+    .ititle { font-weight: bold; font-size: 8.5pt; display: block; margin-bottom: 1px; }
+    .irow   { display: table; width: 100%; margin-bottom: 2px; }
+    .isub   { display: table-cell; font-style: italic; font-size: 8pt; color: #555; }
+    .idate  { display: table-cell; white-space: nowrap; text-align: right;
+              padding-left: 10px; font-size: 8pt; color: #555; }
+    ul      { margin: 2px 0 0; padding-left: 12px; }
+    li      { margin-bottom: 1px; font-size: 8.5pt; }
+    p       { margin: 0 0 3px; font-size: 8.5pt; }
+    /* ── 3-column skills ── */
+    .sk     { list-style: none; padding: 0; margin: 0; column-count: 3; column-gap: 10px; }
+    .sk li  { margin-bottom: 1px; font-size: 8pt; }
+    .sk li::before { content: "• "; }
+  `;
+
+  const name    = esc(data.name || "Your Name");
+  const prof    = data.experience?.[0]?.title ? esc(data.experience[0].title) : "";
+  const contact = data.contact || {};
+  const url     = getContactLinkUrl(contact);
+  const cparts  = contactParts(contact, url, contact.link || contact.behance || "Portfolio");
+
+  const expHtml = (data.experience || []).map(exp => `
+    <div class="item">
+      <span class="ititle">${esc(exp.title)}</span>
+      <div class="irow">
+        <span class="isub">${esc(exp.company)}</span>
+        <span class="idate">${esc(exp.dates)}</span>
+      </div>
+      <ul>${(exp.details || []).map(d => `<li>${esc(d)}</li>`).join("")}</ul>
+    </div>`).join("");
+
+  const eduHtml = (data.education || []).map(edu => `
+    <div class="item">
+      <span class="ititle">${esc(edu.degree)}</span>
+      <div class="irow">
+        <span class="isub">${esc(edu.institution)}</span>
+        <span class="idate">${esc(edu.dates)}</span>
+      </div>
+    </div>`).join("");
+
+  const skHtml = (data.skills || []).length
+    ? `<ul class="sk">${(data.skills || []).map(s => `<li>${esc(s)}</li>`).join("")}</ul>` : "";
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>${css}</style></head><body>
+  <div class="hdr">
+    <div class="hdr-left">
+      <h1>${name}</h1>
+      ${prof ? `<div class="prof">${prof}</div>` : ""}
+    </div>
+    <div class="hdr-right">${cparts.join("<br>")}</div>
+  </div>
+  ${data.summary ? `<div class="sec"><h2>Summary</h2><p>${esc(data.summary)}</p></div>` : ""}
+  ${(data.experience||[]).length ? `<div class="sec"><h2>Experience</h2>${expHtml}</div>` : ""}
+  ${(data.education||[]).length  ? `<div class="sec"><h2>Education</h2>${eduHtml}</div>`  : ""}
+  ${(data.skills||[]).length     ? `<div class="sec"><h2>Skills</h2>${skHtml}</div>`      : ""}
+  </body></html>`;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Template: Executive  — strong navy typography, no background tricks
+//
+// No full-bleed or sidebar — plain @page margins like all other templates.
+// The executive feel comes from the thick accent border, navy h2, and
+// orange company name accent rather than background hacks.
+// ─────────────────────────────────────────────────────────────────────────────
+const createResumeHtml_Executive = (data) => {
+  const css = `
+    @page { size: A4; margin: 18mm 22mm 16mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; font-family: Arial, Helvetica, sans-serif;
+           font-size: 9pt; line-height: 1.44; color: #1e1e2e; background: #fff; }
+    /* ── header ── */
+    .hdr { margin-bottom: 11px; padding-bottom: 9px;
+           border-bottom: 3px solid #1b2a3b;
+           page-break-inside: avoid; break-inside: avoid; }
+    .hdr h1   { margin: 0 0 2px; font-size: 22pt; font-weight: 900;
+                text-transform: uppercase; letter-spacing: 2px; color: #1b2a3b; }
+    .hdr .prof { font-size: 10pt; color: #ff8a2a; font-weight: 700;
+                 text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; }
+    .hdr .cbar { font-size: 8.5pt; color: #555; }
+    .hdr .cbar a { color: #555; text-decoration: none; }
+    /* ── section headers ── */
+    h2 { font-size: 9pt; font-weight: 900; text-transform: uppercase;
+         letter-spacing: 1.5px; color: #1b2a3b;
+         border-bottom: 2px solid #1b2a3b;
+         margin: 13px 0 5px; padding-bottom: 2px;
+         page-break-after: avoid; break-after: avoid; }
+    .sec { margin-bottom: 10px; }
+    /* ── items: title on its own line; company + date share a row ── */
+    .item   { margin-bottom: 8px; page-break-inside: avoid; break-inside: avoid; }
+    .ititle { font-weight: bold; font-size: 9.5pt; color: #1b2a3b;
+              display: block; margin-bottom: 1px; }
+    .irow   { display: table; width: 100%; margin-bottom: 3px; }
+    .isub   { display: table-cell; font-style: italic; font-size: 9pt; color: #ff8a2a; }
+    .idate  { display: table-cell; white-space: nowrap; text-align: right;
+              padding-left: 10px; font-size: 8.5pt; color: #666; }
+    ul { margin: 3px 0 0; padding-left: 14px; }
+    li { margin-bottom: 2px; font-size: 9pt; }
+    p  { margin: 0 0 4px; font-size: 9pt; }
+    /* ── skills 2-col with orange bullets ── */
+    .sk     { list-style: none; padding: 0; margin: 0; column-count: 2; column-gap: 14px; }
+    .sk li  { margin-bottom: 2px; font-size: 9pt; padding-left: 11px; position: relative; }
+    .sk li::before { content: "›"; position: absolute; left: 0;
+                     color: #ff8a2a; font-weight: bold; font-size: 10pt; }
+  `;
+
+  const name    = esc(data.name || "Your Name");
+  const prof    = data.experience?.[0]?.title ? esc(data.experience[0].title) : "";
+  const contact = data.contact || {};
+  const url     = getContactLinkUrl(contact);
+  const cparts  = contactParts(contact, url, contact.link || contact.behance || "Portfolio");
+
+  const expHtml = (data.experience || []).map(exp => `
+    <div class="item">
+      <span class="ititle">${esc(exp.title)}</span>
+      <div class="irow">
+        <span class="isub">${esc(exp.company)}</span>
+        <span class="idate">${esc(exp.dates)}</span>
+      </div>
+      <ul>${(exp.details || []).map(d => `<li>${esc(d)}</li>`).join("")}</ul>
+    </div>`).join("");
+
+  const eduHtml = (data.education || []).map(edu => `
+    <div class="item">
+      <span class="ititle">${esc(edu.degree)}</span>
+      <div class="irow">
+        <span class="isub">${esc(edu.institution)}</span>
+        <span class="idate">${esc(edu.dates)}</span>
+      </div>
+    </div>`).join("");
+
+  const skHtml = (data.skills || []).length
+    ? `<ul class="sk">${(data.skills || []).map(s => `<li>${esc(s)}</li>`).join("")}</ul>` : "";
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>${css}</style></head><body>
+  <div class="hdr">
+    <h1>${name}</h1>
+    ${prof ? `<div class="prof">${prof}</div>` : ""}
+    <div class="cbar">${cparts.join(" &nbsp;|&nbsp; ")}</div>
+  </div>
+  ${data.summary    ? `<div class="sec"><h2>Summary</h2><p>${esc(data.summary)}</p></div>` : ""}
+  ${(data.experience||[]).length ? `<div class="sec"><h2>Experience</h2>${expHtml}</div>` : ""}
+  ${(data.education||[]).length  ? `<div class="sec"><h2>Education</h2>${eduHtml}</div>`  : ""}
+  ${(data.skills||[]).length     ? `<div class="sec"><h2>Skills</h2>${skHtml}</div>`      : ""}
+  </body></html>`;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Template: Blueprint  — editorial, h2 with extending rule, serif accent
+// ─────────────────────────────────────────────────────────────────────────────
+const createResumeHtml_Blueprint = (data) => {
+  const css = `
+    @page { size: A4; margin: 18mm 22mm 16mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; font-family: Arial, Helvetica, sans-serif;
+           font-size: 9pt; line-height: 1.44; color: #222; background: #fff; }
+    /* ── header ── */
+    .hdr     { margin-bottom: 10px; border-bottom: 3px double #111; padding-bottom: 7px; }
+    .hdr h1  { margin: 0 0 3px; font-size: 22pt; font-weight: 900;
+               letter-spacing: 3px; text-transform: uppercase; color: #111; }
+    .hdr .prof { font-size: 9.5pt; color: #555; margin-bottom: 5px; }
+    .hdr .cbar { font-size: 8.5pt; color: #444; }
+    .hdr .cbar a { color: #444; text-decoration: none; }
+    /* ── section headers with extending rule ──
+       Uses table layout: h2 text left, rule takes remaining width */
+    h2 {
+      display: table; width: 100%;
+      font-size: 8.8pt; font-weight: 900; text-transform: uppercase;
+      letter-spacing: 2px; color: #111;
+      margin: 12px 0 5px; padding: 0;
+      page-break-after: avoid; break-after: avoid;
+    }
+    h2::before { content: attr(data-label); display: table-cell;
+                 white-space: nowrap; padding-right: 8px; }
+    h2::after  { content: ""; display: table-cell; width: 100%;
+                 border-bottom: 1.4px solid #111; vertical-align: middle; }
+    /* ── items: title on its own line; company + date share a row ── */
+    .sec  { margin-bottom: 9px; }
+    .item { margin-bottom: 7px; page-break-inside: avoid; break-inside: avoid; }
+    .ititle { font-weight: bold; font-size: 9.5pt; text-transform: uppercase;
+              letter-spacing: 0.3px; display: block; margin-bottom: 1px; }
+    .irow   { display: table; width: 100%; margin-bottom: 3px; }
+    .isub   { display: table-cell; font-size: 9pt; color: #555; font-weight: 700; }
+    .idate  { display: table-cell; white-space: nowrap; text-align: right;
+              padding-left: 10px; font-size: 8.5pt; color: #444; font-weight: 700; }
+    ul      { margin: 3px 0 0; padding-left: 13px; list-style-type: square; }
+    li      { margin-bottom: 2px; font-size: 9pt; }
+    p       { margin: 0 0 4px; font-size: 9pt; }
+    /* ── skills 2-col ── */
+    .sk     { list-style: none; padding: 0; margin: 0; column-count: 2; column-gap: 14px; }
+    .sk li  { margin-bottom: 2px; font-size: 9pt; padding-left: 10px; position: relative; }
+    .sk li::before { content: "▪"; position: absolute; left: 0; font-size: 7pt; top: 1px; }
+  `;
+
+  // Blueprint uses data-label attribute on h2 so ::before can read the section title
+  const h2 = (label) => `<h2 data-label="${esc(label)}"></h2>`;
+
+  const name    = esc(data.name || "Your Name");
+  const prof    = data.experience?.[0]?.title ? esc(data.experience[0].title) : "";
+  const contact = data.contact || {};
+  const url     = getContactLinkUrl(contact);
+  const cparts  = contactParts(contact, url, contact.link || contact.behance || "Portfolio");
+
+  const expHtml = (data.experience || []).map(exp => `
+    <div class="item">
+      <span class="ititle">${esc(exp.title)}</span>
+      <div class="irow">
+        <span class="isub">${esc(exp.company)}</span>
+        <span class="idate">${esc(exp.dates)}</span>
+      </div>
+      <ul>${(exp.details || []).map(d => `<li>${esc(d)}</li>`).join("")}</ul>
+    </div>`).join("");
+
+  const eduHtml = (data.education || []).map(edu => `
+    <div class="item">
+      <span class="ititle">${esc(edu.degree)}</span>
+      <div class="irow">
+        <span class="isub">${esc(edu.institution)}</span>
+        <span class="idate">${esc(edu.dates)}</span>
+      </div>
+    </div>`).join("");
+
+  const skHtml = (data.skills || []).length
+    ? `<ul class="sk">${(data.skills || []).map(s => `<li>${esc(s)}</li>`).join("")}</ul>` : "";
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>${css}</style></head><body>
+  <div class="hdr">
+    <h1>${name}</h1>
+    ${prof ? `<div class="prof">${prof}</div>` : ""}
+    <div class="cbar">${cparts.join(" &nbsp;·&nbsp; ")}</div>
+  </div>
+  ${data.summary ? `<div class="sec">${h2("Professional Profile")}<p>${esc(data.summary)}</p></div>` : ""}
+  ${(data.experience||[]).length ? `<div class="sec">${h2("Work Experience")}${expHtml}</div>` : ""}
+  ${(data.education||[]).length  ? `<div class="sec">${h2("Education")}${eduHtml}</div>`       : ""}
+  ${(data.skills||[]).length     ? `<div class="sec">${h2("Skills")}${skHtml}</div>`           : ""}
+  </body></html>`;
+};
+
+// Legacy/unused — kept for reference, not in switch
 const createResumeHtml_Modern = (data) => {
   const styles = `
     @page { size: A4; margin: 15mm; }
@@ -149,7 +741,8 @@ const createResumeHtml_Modern = (data) => {
   const education = data.education || [];
   const skills = data.skills || [];
   const contactLinkUrl = getContactLinkUrl(contact);
-  const contactLinkText = contact.link || contact.behance || "Website/Portfolio";
+  const contactLinkText =
+    contact.link || contact.behance || "Website/Portfolio";
   let contactHtml = '<div class="section contact-info"><h2>Contact</h2>';
   if (contact.email)
     contactHtml += `<p><a href="mailto:${contact.email}">${contact.email}</a></p>`;
@@ -165,11 +758,11 @@ const createResumeHtml_Modern = (data) => {
       : "";
   let experienceHtml = "";
   experience.forEach((exp) => {
-    experienceHtml += `<div class="experience-item"><div class="item-header"><strong>${exp.title || "[Job Title]"}</strong><span class="dates">${exp.dates || "[Dates]"}</span></div><span class="company">${exp.company || "[Company]"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`;
+    experienceHtml += `<div class="experience-item"><div class="item-header"><strong>${exp.title || "[Job Title]"}</strong>${exp.dates ? `<span class="dates">${exp.dates}</span>` : ""}</div><span class="company">${exp.company || "[Company]"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`;
   });
   let educationHtml = "";
   education.forEach((edu) => {
-    educationHtml += `<div class="education-item"><div class="item-header"><strong>${edu.degree || "[Degree]"}</strong><span class="dates">${edu.dates || "[Year Graduated]"}</span></div><span class="institution">${edu.institution || "[Institution]"}</span></div>`;
+    educationHtml += `<div class="education-item"><div class="item-header"><strong>${edu.degree || "[Degree]"}</strong>${edu.dates ? `<span class="dates">${edu.dates}</span>` : ""}</div><span class="institution">${edu.institution || "[Institution]"}</span></div>`;
   });
   const summaryHtml = summary
     ? `<div class="section"><h2>Summary</h2><p>${summary}</p></div>`
@@ -185,458 +778,6 @@ const createResumeHtml_Modern = (data) => {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${name} - Resume</title><style>${styles}</style></head><body><div class="page"><div class="header"><h1>${name}</h1>${profession ? `<div class="profession-title">${profession}</div>` : ""}</div><div class="resume-container"><div class="main-content">${summaryHtml}${experienceSectionHtml}${educationSectionHtml}</div><div class="sidebar">${contactHtml}${skillsHtml}</div></div></div></body></html>`;
 };
 
-// Template 2: Classic Single-Column
-const createResumeHtml_Classic = (data) => {
-  const styles = `
-    @page { size: A4; margin: 15mm; }
-    @import url('https://fonts.googleapis.com/css2?family=Times+New+Roman&display=swap');
-    body { font-family: 'Times New Roman', serif; line-height: 1.3; color: #000; font-size: 10pt; } /* Size 9.5pt -> 10pt, line-height 1.2 -> 1.3 */
-    .page { width: 100%; margin: 0; box-sizing: border-box; background-color: #fff; }
-    .experience-item, .education-item { page-break-inside: avoid; break-inside: avoid; }
-    .section { page-break-inside: avoid; break-inside: avoid; }
-    h1 { text-align: center; margin: 0 0 1px 0; font-size: 15pt; font-weight: bold; text-transform: uppercase; } /* Reduced margin & font size */
-    .profession-title { text-align: center; font-size: 10.5pt; color: #333; margin-bottom: 6px; font-weight: normal; } /* Reduced size/margin */
-    .contact-info { text-align: center; margin-bottom: 10px; font-size: 9pt; } /* Size 8.5pt -> 9pt */
-    .contact-info a { color: #000; text-decoration: none; margin: 0 1px; } /* Reduced spacing */
-    .contact-info a:hover { text-decoration: underline; }
-    h2 { font-size: 11pt; font-weight: bold; text-transform: uppercase; border-bottom: 1px solid #000; padding-bottom: 0px; margin: 10px 0 4px 0; } /* Reduced size, margins, padding */
-    .section { margin-bottom: 8px; } /* Reduced margin */
-    strong { font-weight: bold; }
-    .item-header { margin-bottom: 0px; overflow: hidden; } /* Clear float, reduced margin */
-    .item-header .title-company { display: inline; font-weight: bold; font-size: 10pt; } /* Size 9.5pt -> 10pt */
-    .item-header .dates { float: right; font-size: 9pt; } /* Size 8.5pt -> 9pt */
-    .company, .institution { display: block; font-style: italic; margin-bottom: 1px; font-size: 9.5pt; } /* Size 9pt -> 9.5pt */
-    ul { padding-left: 14px; margin-top: 1px; list-style-type: disc; } /* Reduced padding & margin */
-    li { margin-bottom: 1px; font-size: 9.5pt; } /* Size 9pt -> 9.5pt */
-    p { margin: 2px 0; } /* Reduced margin */
-    .skills-list { list-style: none; padding: 0; margin: 2px 0 0 0; column-count: 2; column-gap: 15px; } /* Reduced margin & gap, try 2 columns */
-    .skills-list li { margin-bottom: 1px; font-size: 9pt; } /* Size 8.5pt -> 9pt */
-  `;
-  const name = data.name || "Your Name";
-  const profession = data.experience?.[0]?.title;
-  const contact = data.contact || {
-    email: "",
-    phone: "",
-    location: "",
-    link: "",
-    behance: "",
-  };
-  const summary = data.summary || "";
-  const experience = data.experience || [];
-  const education = data.education || [];
-  const skills = data.skills || [];
-  const contactUrl = getContactLinkUrl(contact);
-  const contactText = contact.link || contact.behance || "Website/Portfolio";
-  let contactHtml = "";
-  if (contact.email)
-    contactHtml += `<a href="mailto:${contact.email}">${contact.email}</a>`;
-  if (contact.phone)
-    contactHtml += contact.email ? ` | ${contact.phone}` : contact.phone;
-  if (contact.location)
-    contactHtml +=
-      contact.email || contact.phone
-        ? ` | ${contact.location}`
-        : contact.location;
-  if (contactUrl) {
-    contactHtml +=
-      contact.email || contact.phone || contact.location
-        ? ` | <a href="${contactUrl}" target="_blank">${contactText}</a>`
-        : `<a href="${contactUrl}" target="_blank">${contactText}</a>`;
-  }
-  let experienceHtml = "";
-  experience.forEach((exp) => {
-    experienceHtml += `<div class="experience-item"><div class="item-header"><span class="title-company">${exp.title || "[Job Title]"}</span><span class="dates">${exp.dates || "[Dates]"}</span></div><span class="company">${exp.company || "[Company]"}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`;
-  });
-  let educationHtml = "";
-  education.forEach((edu) => {
-    educationHtml += `<div class="education-item"><div class="item-header"><span class="title-company">${edu.degree || "[Degree]"}</span><span class="dates">${edu.dates || "[Year Graduated]"}</span></div><span class="institution">${edu.institution || "[Institution]"}</span></div>`;
-  });
-  const skillsHtml =
-    skills.length > 0
-      ? `<ul class="skills-list">${skills.map((skill) => `<li>${skill}</li>`).join("")}</ul>`
-      : "";
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${name} - Resume</title><style>${styles}</style></head><body><div class="page"><h1>${name}</h1>${profession ? `<div class="profession-title">${profession}</div>` : ""}<div class="contact-info">${contactHtml}</div>${summary ? `<div class="section"><h2>Summary</h2><p>${summary}</p></div>` : ""}${experience.length > 0 ? `<div class="section"><h2>Experience</h2>${experienceHtml}</div>` : ""}${education.length > 0 ? `<div class="section"><h2>Education</h2>${educationHtml}</div>` : ""}${skills.length > 0 ? `<div class="section"><h2>Skills</h2>${skillsHtml}</div>` : ""}</div></body></html>`;
-};
-
-// Template 3: Compact (Placeholder - uses Classic for now)
-const createResumeHtml_Compact = (data) => {
-  // Add distinct compact styling later if needed
-  return createResumeHtml_Classic(data); // Automatically gets Classic's updated fonts
-};
-
-// Template 4: Creative
-const createResumeHtml_Creative = (data) => {
-  const accentColor = "#4A90E2"; // Example accent color (a nice blue)
-  const styles = `
-    @page { size: A4; margin: 18mm; }
-    @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&family=Roboto+Slab:wght@400;700&display=swap');
-    body { font-family: 'Montserrat', sans-serif; line-height: 1.35; color: #333; font-size: 10pt; margin: 0; padding: 0; background-color: #fff; } /* Size 9.5pt -> 10pt */
-    .page { width: 100%; margin: 0; box-sizing: border-box; background-color: #fff; } /* Full width for PDF */
-    .header h1 { margin: 0; font-family: 'Roboto Slab', serif; font-size: 24pt; color: #111; font-weight: 700; }
-    .profession-title { font-family: 'Roboto Slab', serif; font-size: 12pt; color: ${accentColor}; margin: 2px 0 8px 0; font-weight: 400; } /* Style for profession */
-    .contact-line { font-size: 9.5pt; margin-top: 6px; color: #555; } /* Size 9pt -> 9.5pt */
-    .contact-line a { color: ${accentColor}; text-decoration: none; }
-    .contact-line a:hover { text-decoration: underline; }
-    .contact-line .separator { margin: 0 6px; color: #ccc; }
-
-    h2 { font-family: 'Roboto Slab', serif; font-size: 13pt; color: ${accentColor}; margin: 20px 0 8px 0; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #eee; padding-bottom: 3px; } /* Reduced size, margins, padding, letter-spacing */
-    .section { margin-bottom: 15px; }
-    .header { page-break-inside: avoid; break-inside: avoid; }
-
-    .experience-item, .education-item { margin-bottom: 15px; padding-left: 12px; border-left: 2px solid ${accentColor}; } /* Reduced margin & padding */
-    .item-header { margin-bottom: 2px; overflow: hidden; } /* Added overflow hidden for float */
-    .item-header strong { font-weight: 700; font-size: 11pt; color: #222; display: inline; } /* Size 10.5pt -> 11pt */
-    .item-header .dates { float: right; font-style: normal; color: #666; font-size: 9.5pt; font-weight: 400; } /* Size 9pt -> 9.5pt */
-    .company, .institution { font-weight: 700; color: #555; margin-bottom: 4px; font-size: 10pt; display: block; font-style: italic; } /* Size 9.5pt -> 10pt */
-
-    ul { padding-left: 15px; margin-top: 3px; list-style-type: none; /* Using custom bullets potentially */ } /* Reduced padding/margin */
-    li { margin-bottom: 3px; position: relative; padding-left: 12px; font-size: 9.5pt; } /* Size 9pt -> 9.5pt */
-    li::before { /* Custom bullet */
-        content: '•';
-        color: ${accentColor};
-        font-weight: bold;
-        display: inline-block;
-        width: 1em;
-        margin-left: -1em; /* Adjust spacing */
-        position: absolute;
-        left: 0;
-        font-size: 9.5pt; /* Match li font size */
-    }
-
-    p { margin-top: 0; margin-bottom: 5px; } /* Reduced margin */
-
-    .skills-section { margin-top: 15px; } /* Further reduced margin */
-    .skills-list { list-style: none; padding: 0; margin: 6px 0 0 0; column-count: 3; column-gap: 20px; } /* Reduced margin & gap */
-    .skills-list li { margin-bottom: 2px; font-size: 9.5pt; padding-left: 0; } /* Size 9pt -> 9.5pt */
-     .skills-list li::before { content: none; } /* No bullets for skills */
-
-  `;
-
-  const name = data.name || "Your Name";
-  const profession = data.experience?.[0]?.title;
-  const contact = data.contact || {
-    email: "",
-    phone: "",
-    location: "",
-    link: "",
-    behance: "",
-  };
-  const summary = data.summary || "";
-  const experience = data.experience || [];
-  const education = data.education || [];
-  const skills = data.skills || [];
-  const contactUrl = getContactLinkUrl(contact);
-  const contactText = contact.link || contact.behance || "Website/Portfolio";
-
-  let contactItems = [];
-  if (contact.email)
-    contactItems.push(`<a href="mailto:${contact.email}">${contact.email}</a>`);
-  if (contact.phone) contactItems.push(`<span>${contact.phone}</span>`);
-  if (contact.location) contactItems.push(`<span>${contact.location}</span>`);
-  if (contactUrl) {
-    contactItems.push(`<a href="${contactUrl}" target="_blank">${contactText}</a>`);
-  }
-  const contactHtml =
-    contactItems.length > 0
-      ? `<div class="contact-line">${contactItems.join('<span class="separator">|</span>')}</div>`
-      : "";
-
-  let experienceHtml = "";
-  experience.forEach((exp) => {
-    experienceHtml += `
-          <div class="experience-item">
-              <div class="item-header">
-                  <span class="dates">${exp.dates || "[Dates]"}</span>
-                  <strong>${exp.title || "[Job Title]"}</strong>
-              </div>
-              <span class="company">${exp.company || "[Company]"}</span>
-              <ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul>
-          </div>
-      `;
-  });
-
-  let educationHtml = "";
-  education.forEach((edu) => {
-    educationHtml += `
-          <div class="education-item">
-              <div class="item-header">
-                  <span class="dates">${edu.dates || "[Year Graduated]"}</span>
-                  <strong>${edu.degree || "[Degree]"}</strong>
-              </div>
-              <span class="institution">${edu.institution || "[Institution]"}</span>
-          </div>
-      `;
-  });
-
-  const skillsHtml =
-    skills.length > 0
-      ? `<ul class="skills-list">${skills.map((skill) => `<li>${skill}</li>`).join("")}</ul>`
-      : "";
-
-  const summaryHtml = summary
-    ? `<div class="section"><h2>Profile</h2><p>${summary}</p></div>`
-    : "";
-  const experienceSectionHtml =
-    experience.length > 0
-      ? `<div class="section"><h2>Experience</h2>${experienceHtml}</div>`
-      : "";
-  const educationSectionHtml =
-    education.length > 0
-      ? `<div class="section"><h2>Education</h2>${educationHtml}</div>`
-      : "";
-  const skillsSectionHtml =
-    skills.length > 0
-      ? `<div class="section skills-section"><h2>Skills</h2>${skillsHtml}</div>`
-      : "";
-
-  return `
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>${name} - Resume</title>
-        <style>${styles}</style>
-    </head>
-    <body>
-        <div class="page">
-            <div class="header">
-                <h1>${name}</h1>
-                ${profession ? `<div class="profession-title">${profession}</div>` : ""}
-                ${contactHtml}
-            </div>
-            ${summaryHtml}
-            ${experienceSectionHtml}
-            ${educationSectionHtml}
-            ${skillsSectionHtml}
-        </div>
-    </body>
-    </html>
-  `;
-};
-
-// Template 5: Gradient Modern
-const createResumeHtml_GradientModern = (data) => {
-  // Example Gradient: Teal to Blue
-  const gradient = "linear-gradient(135deg, #16a085 0%, #2980b9 100%)";
-  const styles = `
-    @page { size: A4; margin: 12mm; }
-    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
-    body { font-family: 'Roboto', sans-serif; line-height: 1.35; color: #444; font-size: 9.5pt; margin: 0; padding: 0; background-color: #fff; } /* Size 9pt -> 9.5pt, line-height 1.3 -> 1.35 */
-    .page { width: 100%; margin: 0; box-sizing: border-box; background-color: #fff; position: relative; overflow: hidden; }
-    .experience-item, .education-item { page-break-inside: avoid; break-inside: avoid; }
-    .section { page-break-inside: avoid; break-inside: avoid; }
-    .header { page-break-inside: avoid; break-inside: avoid; background: ${gradient}; color: #fff; padding: 15mm 0 10mm 0; text-align: left; } /* Full-width gradient bar */
-    .header-inner { padding: 0 20mm; display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 18px; align-items: start; }
-    .header-left { min-width: 0; }
-    .header-right { min-width: 0; }
-    .header h1 { margin: 0 0 2px 0; font-size: 22pt; font-weight: 700; letter-spacing: 0.5px; } /* Reduced size/spacing */
-    .profession-title { font-size: 11pt; font-weight: 300; margin-bottom: 10px; opacity: 0.9; } /* Reduced size/margin */
-    .contact-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 3px 12px; font-size: 9pt; margin-top: 8px; } /* Size 8.5pt -> 9pt */
-    .contact-grid a { color: #fff; text-decoration: none; }
-    .contact-grid a:hover { text-decoration: underline; }
-    .contact-grid span { display: inline-block; min-width: 45px; font-weight: 700; opacity: 0.8; } /* Reduced min-width */
-    .content-area { padding: 12mm 18mm; display: block; } /* Reduced padding */
-    h2 { font-size: 13pt; color: #2980b9; border-bottom: 1px solid #e8e8e8; padding-bottom: 3px; margin: 15px 0 10px 0; font-weight: 700; text-transform: uppercase; } /* Reduced size/margins */
-    .section { margin-bottom: 15px; } /* Reduced margin */
-    .experience-item, .education-item { margin-bottom: 12px; padding-left: 12px; border-left: 2px solid #16a085; } /* Reduced margin/padding/border */
-    .item-header { margin-bottom: 2px; overflow: hidden; }
-    .item-header strong { font-weight: 700; font-size: 10pt; color: #333; } /* Reduced size */
-    .item-header .dates { float: right; font-style: normal; color: #666; font-size: 9pt; } /* Size 8.5pt -> 9pt */
-    .company, .institution { font-weight: 700; color: #555; margin-bottom: 3px; font-size: 9.5pt; display: block; } /* Reduced size/margin */
-    ul { padding-left: 15px; margin: 3px 0 0 0; list-style-type: disc; } /* Reduced padding/margin */
-    li { margin-bottom: 3px; font-size: 9.5pt; } /* Size 9pt -> 9.5pt */
-    p { margin: 0 0 6px 0; } /* Reduced margin */
-    .skills-section h2 { margin-top: 18px; } /* Reduced margin */
-    .skills-list { list-style: none; padding: 0; margin: 8px 0 0 0; column-count: 3; column-gap: 20px; } /* Reduced margin/gap */
-    .skills-list li { margin-bottom: 4px; font-size: 9.5pt; } /* Size 9pt -> 9.5pt */
-  `;
-
-  const name = data.name || "Your Name";
-  const profession = data.experience?.[0]?.title;
-  const contact = data.contact || {
-    email: "",
-    phone: "",
-    location: "",
-    link: "",
-    behance: "",
-  };
-  const summary = data.summary || "";
-  const experience = data.experience || [];
-  const education = data.education || [];
-  const skills = data.skills || [];
-  const contactUrl = getContactLinkUrl(contact);
-  const contactText = contact.link || contact.behance || "Website/Portfolio";
-
-  let contactDetailsHtml = '<div class="contact-grid">';
-  if (contact.email)
-    contactDetailsHtml += `<div><span>Email:</span> <a href="mailto:${contact.email}">${contact.email}</a></div>`;
-  if (contact.phone)
-    contactDetailsHtml += `<div><span>Phone:</span> ${contact.phone}</div>`;
-  if (contact.location)
-    contactDetailsHtml += `<div><span>Location:</span> ${contact.location}</div>`;
-  if (contactUrl) {
-    contactDetailsHtml += `<div><span>Website/Portfolio:</span> <a href="${contactUrl}" target="_blank">${contactText}</a></div>`;
-  }
-  contactDetailsHtml += "</div>";
-
-  let experienceHtml = "";
-  experience.forEach((exp) => {
-    experienceHtml += `<div class="experience-item"><div class="item-header"><span class="dates">${exp.dates || ""}</span><strong>${exp.title || ""}</strong></div><span class="company">${exp.company || ""}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`;
-  });
-  let educationHtml = "";
-  education.forEach((edu) => {
-    educationHtml += `<div class="education-item"><div class="item-header"><span class="dates">${edu.dates || ""}</span><strong>${edu.degree || ""}</strong></div><span class="institution">${edu.institution || ""}</span></div>`;
-  });
-  const skillsHtml =
-    skills.length > 0
-      ? `<ul class="skills-list">${skills.map((skill) => `<li>${skill}</li>`).join("")}</ul>`
-      : "";
-
-  const summaryHtml = summary
-    ? `<div class="section"><h2>Summary</h2><p>${summary}</p></div>`
-    : "";
-  const experienceSectionHtml =
-    experience.length > 0
-      ? `<div class="section"><h2>Experience</h2>${experienceHtml}</div>`
-      : "";
-  const educationSectionHtml =
-    education.length > 0
-      ? `<div class="section"><h2>Education</h2>${educationHtml}</div>`
-      : "";
-  const skillsSectionHtml =
-    skills.length > 0
-      ? `<div class="section skills-section"><h2>Skills</h2>${skillsHtml}</div>`
-      : "";
-
-  return `
-    <!DOCTYPE html><html><head><meta charset="UTF-8"><title>${name} - Resume</title><style>${styles}</style></head><body><div class="page">
-      <div class="header"><div class="header-inner">
-        <div class="header-left">
-          <h1>${name}</h1>
-          ${profession ? `<div class="profession-title">${profession}</div>` : ""}
-          ${contactDetailsHtml}
-        </div>
-        <div class="header-right">
-          ${skillsHtml}
-        </div>
-      </div></div>
-      <div class="content-area">
-        ${summaryHtml}
-        ${experienceSectionHtml}
-        ${educationSectionHtml}
-      </div>
-    </div></body></html>
-  `;
-};
-
-// Template 6: Gradient Creative
-const createResumeHtml_GradientCreative = (data) => {
-  // Example Gradient: Purple to Pink
-  const gradient = "linear-gradient(135deg, #8e44ad 0%, #c0392b 100%)";
-  const accentColor = "#c0392b"; // Use end gradient color as accent
-  const styles = `
-    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap');
-    body { font-family: 'Poppins', sans-serif; line-height: 1.45; color: #333; font-size: 10pt; margin: 0; padding: 0; background-color: #fff; } /* Size 9.5pt -> 10pt */
-    @page { size: A4; margin: 18mm; }
-    .page { width: 100%; margin: 0; box-sizing: border-box; background-color: #fff; }
-    .layout { display: block; }
-    .sidebar { background: ${gradient}; color: #fff; width: 100%; padding: 18mm 20mm; display: block; }
-    .main-content { width: 100%; padding: 18mm 20mm; display: block; }
-    .sidebar h1 { font-size: 22pt; margin: 0 0 2px 0; font-weight: 700; page-break-inside: avoid; break-inside: avoid; }
-    .sidebar .profession-title { font-size: 12pt; font-weight: 300; margin-bottom: 20px; opacity: 0.9; }
-    .sidebar h2 { font-size: 11pt; font-weight: 600; text-transform: uppercase; border-bottom: 1px solid rgba(255,255,255,0.3); padding-bottom: 4px; margin: 20px 0 10px 0; page-break-inside: avoid; break-inside: avoid; }
-    .contact-info { page-break-inside: avoid; break-inside: avoid; }
-    .contact-info p { margin: 4px 0; font-size: 9.5pt; } /* Size 9pt -> 9.5pt */
-    .contact-info a { color: #fff; text-decoration: none; page-break-inside: avoid; break-inside: avoid; }
-    .contact-info a:hover { text-decoration: underline; }
-    .skills-list { list-style: none; padding: 0; margin: 8px 0 0 0; page-break-inside: avoid; break-inside: avoid; }
-    .skills-list li { margin-bottom: 4px; font-size: 9.5pt; } /* Size 9pt -> 9.5pt */
-    .main-content h2 { font-size: 14pt; color: ${accentColor}; border-bottom: 2px solid #eee; padding-bottom: 3px; margin: 0 0 12px 0; font-weight: 700; text-transform: uppercase; }
-    .main-content .section:not(:first-child) h2 { margin-top: 20px; }
-    .section { margin-bottom: 18px; page-break-inside: avoid; break-inside: avoid; }
-    .experience-item, .education-item { margin-bottom: 15px; page-break-inside: avoid; break-inside: avoid; }
-    .item-header { margin-bottom: 2px; overflow: hidden; }
-    .item-header strong { font-weight: 600; font-size: 10.5pt; color: #111; }
-    .item-header .dates { float: right; font-style: normal; color: #555; font-size: 9.5pt; } /* Size 9pt -> 9.5pt */
-    .company, .institution { font-weight: 600; color: #444; margin-bottom: 4px; font-size: 10pt; display: block; }
-    ul { padding-left: 18px; margin: 4px 0 0 0; list-style-type: none; page-break-inside: avoid; break-inside: avoid; }
-    li { margin-bottom: 4px; position: relative; padding-left: 15px; font-size: 9.5pt; page-break-inside: avoid; break-inside: avoid; } /* Size 9pt -> 9.5pt */
-    li::before { content: '•'; color: ${accentColor}; position: absolute; left: 0; font-weight: bold; font-size: 9.5pt; /* Match li size */ }
-    p { margin: 0 0 8px 0; page-break-inside: avoid; break-inside: avoid; }
-  `;
-
-  const name = data.name || "Your Name";
-  const profession = data.experience?.[0]?.title;
-  const contact = data.contact || {
-    email: "",
-    phone: "",
-    location: "",
-    link: "",
-    behance: "",
-  };
-  const summary = data.summary || "";
-  const experience = data.experience || [];
-  const education = data.education || [];
-  const skills = data.skills || [];
-  const contactUrl = getContactLinkUrl(contact);
-  const contactText = contact.link || contact.behance || "Website/Portfolio";
-
-  let contactHtml = '<div class="section contact-info"><h2>Contact</h2>';
-  if (contact.email)
-    contactHtml += `<p><a href="mailto:${contact.email}">${contact.email}</a></p>`;
-  if (contact.phone) contactHtml += `<p>${contact.phone}</p>`;
-  if (contact.location) contactHtml += `<p>${contact.location}</p>`;
-  if (contactUrl) {
-    contactHtml += `<p><a href="${contactUrl}" target="_blank">${contactText}</a></p>`;
-  }
-  contactHtml += "</div>";
-
-  const skillsHtml =
-    skills.length > 0
-      ? `<div class="section skills-section"><h2>Skills</h2><ul class="skills-list">${skills.map((skill) => `<li>${skill}</li>`).join("")}</ul></div>`
-      : "";
-
-  let experienceHtml = "";
-  experience.forEach((exp) => {
-    experienceHtml += `<div class="experience-item"><div class="item-header"><span class="dates">${exp.dates || ""}</span><strong>${exp.title || ""}</strong></div><span class="company">${exp.company || ""}</span><ul>${(exp.details || []).map((d) => `<li>${d}</li>`).join("")}</ul></div>`;
-  });
-  let educationHtml = "";
-  education.forEach((edu) => {
-    educationHtml += `<div class="education-item"><div class="item-header"><span class="dates">${edu.dates || ""}</span><strong>${edu.degree || ""}</strong></div><span class="institution">${edu.institution || ""}</span></div>`;
-  });
-
-  const summaryHtml = summary
-    ? `<div class="section"><h2>Summary</h2><p>${summary}</p></div>`
-    : "";
-  const experienceSectionHtml =
-    experience.length > 0
-      ? `<div class="section"><h2>Experience</h2>${experienceHtml}</div>`
-      : "";
-  const educationSectionHtml =
-    education.length > 0
-      ? `<div class="section"><h2>Education</h2>${educationHtml}</div>`
-      : "";
-
-  return `
-    <!DOCTYPE html><html><head><meta charset="UTF-8"><title>${name} - Resume</title><style>${styles}</style></head><body><div class="page"><div class="layout">
-      <div class="sidebar">
-          <h1>${name}</h1>
-          ${profession ? `<div class="profession-title">${profession}</div>` : ""}
-          ${contactHtml}
-          ${skillsHtml}
-      </div>
-      <div class="main-content">
-        ${summaryHtml}
-        ${experienceSectionHtml}
-        ${educationSectionHtml}
-      </div>
-    </div></div></body></html>
-  `;
-};
-
-// --- GROQ Client Initialization ---
-// Assuming GROQ_API_KEY is set as an environment variable
-const groq = new Groq();
 
 // --- API Endpoints ---
 
@@ -676,8 +817,9 @@ ${resumeText}
 Job Title:`;
 
   try {
-    console.log("Calling Groq API for title extraction...");
-    const chatCompletion = await groq.chat.completions.create({
+    console.log("Calling DeepInfra API for title extraction...");
+    const chatCompletion = await deepInfraChatCompletion({
+      model: DEEPINFRA_MODEL,
       messages: [
         {
           role: "system",
@@ -686,24 +828,19 @@ Job Title:`;
         },
         { role: "user", content: prompt },
       ],
-      model: "llama-3.3-70b-versatile", // Using a potentially faster model for this focused task
-      temperature: 0.2, // Lower temperature for more deterministic title extraction
-      max_tokens: 50, // Generous buffer for title length
-      top_p: 1,
-      stop: null,
-      stream: false,
+      temperature: 0.2,
+      max_tokens: 50,
     });
 
     let extractedTitle =
       chatCompletion.choices[0]?.message?.content?.trim() || "";
-    console.log("Groq API response for title:", extractedTitle);
 
     // Basic cleanup: remove potential quotes or leading/trailing punctuation sometimes added by AI
     extractedTitle = extractedTitle.replace(/^["'\s]+|["'\s\.]+$/g, "");
 
     res.json({ extractedTitle });
   } catch (error) {
-    console.error("Error calling Groq API for title extraction:", error);
+    console.error("Error calling DeepInfra API for title extraction:", error);
     res
       .status(500)
       .json({ error: "Failed to extract title from resume using AI" });
@@ -721,15 +858,9 @@ app.post("/api/optimize-resume", async (req, res) => {
       .json({ error: "Missing resumeText or jobDescription" });
   }
   console.log(`[/api/optimize-resume] Style received: ${style}`);
-  const groqApiKey = process.env.GROQ_API_KEY;
-  if (!groqApiKey) {
-    console.error("Error: GROQ_API_KEY environment variable not set.");
-    return res.status(500).json({ error: "Server configuration error." });
-  }
   console.log("[/api/optimize-resume] Starting optimization process...");
   try {
     console.log("[/api/optimize-resume] Constructing prompt...");
-    const client = new Groq({ apiKey: groqApiKey });
 
     // Define prompt components using simple strings
     const promptCore =
@@ -792,36 +923,34 @@ app.post("/api/optimize-resume", async (req, res) => {
       "Optimized Resume JSON:\n    ";
 
     console.log(
-      `[/api/optimize-resume] Sending prompt to Groq with style: ${style}`,
+      `[/api/optimize-resume] Sending prompt to DeepInfra with style: ${style}`,
     );
     // console.log("Full prompt:", finalPrompt); // Optional: uncomment to debug the exact prompt being sent
-    const completion = await client.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+    const completion = await deepInfraChatCompletion({
+      model: DEEPINFRA_MODEL,
       messages: [{ role: "user", content: finalPrompt }],
       temperature: 0.4,
       max_tokens: 4096,
-      response_format: { type: "json_object" },
     });
-    console.log("[/api/optimize-resume] Groq API call completed.");
+    console.log("[/api/optimize-resume] DeepInfra API call completed.");
     let optimizedResumeJson;
     try {
-      console.log("[/api/optimize-resume] Parsing Groq response...");
+      console.log("[/api/optimize-resume] Parsing DeepInfra response...");
       optimizedResumeJson = JSON.parse(completion.choices[0].message.content);
-      console.log("[/api/optimize-resume] Groq response parsed successfully.");
-
-      // *** ADD SANITIZATION STEP ***
-      console.log("[/api/optimize-resume] Sanitizing JSON response...");
-      const sanitizedJson = sanitizeResumeJson(optimizedResumeJson);
-      console.log("[/api/optimize-resume] Sanitization complete.");
-
-      res.json({ optimizedResumeJson: sanitizedJson }); // Send sanitized JSON
-    } catch (parseError) {
-      console.error(
-        "Failed to parse Groq JSON response:",
-        completion.choices[0].message.content,
+      console.log(
+        "[/api/optimize-resume] DeepInfra response parsed successfully.",
       );
+    } catch (parseError) {
+      console.error("Failed to parse DeepInfra JSON response (content omitted for privacy)");
       throw new Error("AI failed to return valid JSON structure.");
     }
+
+    // *** ADD SANITIZATION STEP ***
+    console.log("[/api/optimize-resume] Sanitizing JSON response...");
+    const sanitizedJson = sanitizeResumeJson(optimizedResumeJson);
+    console.log("[/api/optimize-resume] Sanitization complete.");
+
+    res.json({ optimizedResumeJson: sanitizedJson }); // Send sanitized JSON
   } catch (error) {
     console.error("[/api/optimize-resume] Error during optimization:", error);
     res
@@ -850,42 +979,256 @@ app.post("/api/generate-pdf", async (req, res) => {
       case "creative":
         htmlContent = createResumeHtml_Creative(resumeData);
         break;
+      case "compact":
+        htmlContent = createResumeHtml_Compact(resumeData);
+        break;
+      case "executive":
+        htmlContent = createResumeHtml_Executive(resumeData);
+        break;
+      case "blueprint":
+        htmlContent = createResumeHtml_Blueprint(resumeData);
+        break;
       default:
         htmlContent = createResumeHtml_Classic(resumeData);
         break;
     }
     console.log("[/api/generate-pdf] Launching Puppeteer...");
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
+    const browser = await puppeteer.launch(getPuppeteerLaunchOptions());
     console.log("[/api/generate-pdf] Puppeteer launched. Creating new page...");
     const page = await browser.newPage();
-    console.log("[/api/generate-pdf] Setting page content...");
-    await page.setContent(htmlContent, { waitUntil: "networkidle0" });
-    await page.emulateMediaType("print");
-    console.log("[/api/generate-pdf] Generating PDF buffer...");
-    const pdfBuffer = await page.pdf({
-      format: "A4",
-      printBackground: true,
-      margin: { top: "0", bottom: "0", left: "0", right: "0" },
-      preferCSSPageSize: true,
-    });
-    console.log("[/api/generate-pdf] PDF buffer generated. Closing browser...");
+
+    console.log("[/api/generate-pdf] Generating PDF with smart pagination...");
+    const { pagination, pdfBuffer } = await createPdfBufferFromHtml(
+      page,
+      htmlContent,
+    );
+
+    console.log(
+      "[/api/generate-pdf] Pagination result:",
+      JSON.stringify({
+        pages: pagination.finalMetrics.pages,
+        scale: pagination.scale,
+        balancedLastPage: pagination.balancedLastPage,
+        lastPageUsage:
+          (pagination.finalMetrics.lastPageUsage * 100).toFixed(1) + "%",
+      }),
+    );
+
+    console.log("[/api/generate-pdf] Closing browser...");
     await browser.close();
-    console.log(
-      "[/api/generate-pdf] Browser closed. Encoding PDF to base64...",
-    );
     const pdfBase64String = Buffer.from(pdfBuffer).toString("base64");
-    console.log(
-      "Generated PDF Base64 (first 100 chars):",
-      pdfBase64String.substring(0, 100),
-    );
     console.log("[/api/generate-pdf] Sending response to client...");
     res.json({ pdfBase64: pdfBase64String });
   } catch (error) {
     console.error("[/api/generate-pdf] Error during PDF generation:", error);
     res.status(500).json({ error: `Failed to generate PDF: ${error.message}` });
+  }
+});
+
+// ─── Document Writer: AI Draft ───────────────────────────────────────────────
+app.post("/draft-document", async (req, res) => {
+  if (!validateApiKey()) return res.status(500).json({ error: "API key not configured" });
+
+  const { docType, fields } = req.body;
+  if (!docType || !fields) return res.status(400).json({ error: "Missing docType or fields" });
+
+  const prompts = {
+    coverLetter: `You are an expert cover letter writer. Write a professional cover letter for:
+- Applicant: ${fields.yourName}
+- Applying for: ${fields.jobTitle} at ${fields.companyName}
+- Addressed to: ${fields.recipientName}${fields.recipientTitle ? ", " + fields.recipientTitle : ""}
+- Background: ${fields.yourBackground}
+- Why this role/company: ${fields.whyThisRole}
+- Tone: ${fields.tone}
+
+Return ONLY a JSON object with exactly two keys:
+{ "subject": "Application for [Job Title] – [Name]", "body": "Full letter body here with paragraphs separated by \\n\\n. Do NOT include the address block or date — just the salutation through the sign-off." }`,
+
+    formalBusiness: `You are an expert business letter writer. Write a formal business letter for:
+- From: ${fields.yourName}
+- To: ${fields.recipientName}${fields.recipientTitle ? ", " + fields.recipientTitle : ""} at ${fields.companyName}
+- Purpose: ${fields.letterPurpose}
+- Key points to cover: ${fields.keyMessage}
+- Tone: ${fields.tone}
+
+Return ONLY a JSON object:
+{ "subject": "Re: [brief subject line]", "body": "Full letter body with paragraphs separated by \\n\\n. Start with Dear [name], end with Yours sincerely / Regards." }`,
+
+    resignation: `You are an expert at writing professional resignation letters. Write a resignation letter for:
+- From: ${fields.yourName}
+- To: ${fields.recipientName}, ${fields.recipientTitle} at ${fields.companyName}
+- Notice period: ${fields.noticePeriod}
+- Last working day: ${fields.lastWorkingDay}
+${fields.reasonForLeaving ? "- Reason: " + fields.reasonForLeaving : ""}
+- Tone: ${fields.tone}
+
+Return ONLY a JSON object:
+{ "subject": "Resignation Letter – ${fields.yourName}", "body": "Full letter body with paragraphs separated by \\n\\n. Professional, gracious, brief. Start with Dear [name], end with a warm sign-off." }`,
+
+    referenceRequest: `You are an expert professional writer. Write a polite reference request letter for:
+- From: ${fields.yourName}
+- Requesting reference from: ${fields.referenceName} (${fields.referenceRelationship})
+- Purpose: ${fields.purposeOfReference}
+${fields.keyMessage ? "- Key context: " + fields.keyMessage : ""}
+- Tone: ${fields.tone}
+
+Return ONLY a JSON object:
+{ "subject": "Reference Request – ${fields.yourName}", "body": "Full letter body with paragraphs separated by \\n\\n. Polite, appreciative, concise. Start with Dear [name], end with a warm thank-you sign-off." }`,
+  };
+
+  const prompt = prompts[docType];
+  if (!prompt) return res.status(400).json({ error: "Unknown document type" });
+
+  try {
+    const completion = await deepInfraChatCompletion({
+      messages: [
+        { role: "system", content: "You are a professional document writer. Always respond with valid JSON only — no markdown, no code fences, no extra text." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.6,
+      max_tokens: 1500,
+    });
+
+    const raw = completion.choices[0].message.content.trim()
+      .replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
+
+    const draft = JSON.parse(raw);
+    if (!draft.subject || !draft.body) throw new Error("Invalid draft structure");
+    res.json(draft);
+  } catch (err) {
+    console.error("Draft document error (content omitted for privacy)");
+    res.status(500).json({ error: "Failed to draft document" });
+  }
+});
+
+// ─── Document Writer: Generate PDF ───────────────────────────────────────────
+app.post("/generate-document-pdf", async (req, res) => {
+  const { docType, fields, draft, template } = req.body;
+  if (!fields || !draft) return res.status(400).json({ error: "Missing fields or draft" });
+
+  const templates = {
+    classic: {
+      fontFamily: "'Georgia', 'Times New Roman', serif",
+      headingColor: "#1a1a1a",
+      accentColor: "#1a1a1a",
+      borderStyle: "none",
+      headerBg: "transparent",
+    },
+    modern: {
+      fontFamily: "'Arial', 'Helvetica', sans-serif",
+      headingColor: "#FF8428",
+      accentColor: "#FF8428",
+      borderStyle: "none",
+      headerBg: "transparent",
+    },
+    corporate: {
+      fontFamily: "'Arial', 'Helvetica', sans-serif",
+      headingColor: "#1a1a1a",
+      accentColor: "#1a1a1a",
+      borderStyle: "2px solid #1a1a1a",
+      headerBg: "transparent",
+    },
+  };
+
+  const tmpl = templates[template] || templates.modern;
+
+  // Build address block
+  const senderLines = [
+    fields.yourName,
+    fields.yourAddress,
+    fields.yourEmail,
+    fields.yourPhone,
+  ].filter(Boolean);
+
+  const recipientLines = [
+    fields.recipientName,
+    fields.recipientTitle,
+    fields.companyName,
+    fields.companyAddress,
+  ].filter(Boolean);
+
+  // Convert body paragraphs to <p> tags
+  const bodyHtml = draft.body
+    .split(/\n\n+/)
+    .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
+    .join("");
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 210mm; }
+  body {
+    font-family: ${tmpl.fontFamily};
+    font-size: 11pt;
+    line-height: 1.7;
+    color: #1a1a1a;
+    padding: 20mm 22mm;
+    background: white;
+  }
+  .sender-block { margin-bottom: 8mm; }
+  .sender-block .name {
+    font-size: 15pt;
+    font-weight: bold;
+    color: ${tmpl.headingColor};
+    margin-bottom: 2mm;
+    ${template === "corporate" ? "border-bottom: " + tmpl.borderStyle + "; padding-bottom: 3mm;" : ""}
+  }
+  .sender-block .contact { font-size: 9.5pt; color: #555; line-height: 1.6; }
+  .date-line { margin: 6mm 0; font-size: 10.5pt; color: #444; }
+  .recipient-block { margin-bottom: 7mm; font-size: 10.5pt; line-height: 1.6; }
+  .subject-line {
+    font-weight: bold;
+    font-size: 11pt;
+    margin-bottom: 6mm;
+    color: ${tmpl.headingColor};
+  }
+  .body p {
+    margin-bottom: 4mm;
+    text-align: justify;
+    font-size: 11pt;
+  }
+  .body p:last-child { margin-bottom: 0; }
+  @media print {
+    body { padding: 20mm 22mm; }
+    p { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+  <div class="sender-block">
+    <div class="name">${fields.yourName}</div>
+    <div class="contact">${[fields.yourEmail, fields.yourPhone, fields.yourAddress].filter(Boolean).join(" &nbsp;·&nbsp; ")}</div>
+  </div>
+
+  <div class="date-line">${fields.date}</div>
+
+  ${recipientLines.length > 0 ? `<div class="recipient-block">${recipientLines.join("<br>")}</div>` : ""}
+
+  ${draft.subject ? `<div class="subject-line">${draft.subject}</div>` : ""}
+
+  <div class="body">${bodyHtml}</div>
+</body>
+</html>`;
+
+  try {
+    const browser = await puppeteer.launch({ args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "networkidle0" });
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      margin: { top: "0", right: "0", bottom: "0", left: "0" },
+    });
+    await browser.close();
+
+    res.set({ "Content-Type": "application/pdf", "Content-Disposition": "attachment; filename=document.pdf" });
+    res.send(Buffer.from(pdfBuffer));
+  } catch (err) {
+    console.error("PDF generation error:", err.message);
+    res.status(500).json({ error: "Failed to generate PDF" });
   }
 });
 
