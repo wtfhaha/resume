@@ -1233,6 +1233,97 @@ app.post("/generate-document-pdf", async (req, res) => {
   }
 });
 
+// ── Quick Summarize endpoint ──────────────────────────────────────────────────
+app.post("/api/summarize", async (req, res) => {
+  const { type, content, length, language } = req.body;
+
+  if (!content || typeof content !== "string" || content.trim().length === 0) {
+    return res.status(400).json({ error: "Missing content" });
+  }
+
+  const lengthInstruction = {
+    short:    "in exactly 2–3 concise sentences",
+    medium:   "in one well-structured paragraph of 5–7 sentences",
+    detailed: "in a detailed summary that covers all key points, main arguments, and important details — use short paragraphs or bullet points as appropriate",
+  }[length] || "in a clear paragraph";
+
+  const languageInstruction =
+    language === "ar"
+      ? "Write your response in Arabic."
+      : "Write your response in English.";
+
+  try {
+    let summary = "";
+
+    if (type === "image") {
+      // Vision model for image content
+      const VISION_MODEL = "meta-llama/Llama-3.2-11B-Vision-Instruct";
+      const response = await fetch("https://api.deepinfra.com/v1/openai/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.DEEPINFRA_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: VISION_MODEL,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "image_url",
+                  image_url: { url: content },
+                },
+                {
+                  type: "text",
+                  text: `Summarize the content of this image ${lengthInstruction}. Focus on the key information, text, or subject matter visible. ${languageInstruction} Provide only the summary, no introductory phrases.`,
+                },
+              ],
+            },
+          ],
+          temperature: 0.3,
+          max_tokens: 600,
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error?.message || "Vision API error");
+      }
+      const data = await response.json();
+      summary = data.choices[0]?.message?.content?.trim() || "";
+    } else {
+      // Text model for text/PDF content
+      const prompt = `Summarize the following text ${lengthInstruction}. ${languageInstruction} Provide only the summary — no introductory phrases, no "here is a summary", just the summary itself.
+
+Text to summarize:
+---
+${content.slice(0, 12000)}
+---
+
+Summary:`;
+
+      const completion = await deepInfraChatCompletion({
+        model: DEEPINFRA_MODEL,
+        messages: [
+          { role: "system", content: "You are a precise summarization assistant. You summarize content clearly and concisely without adding opinions or commentary." },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.3,
+        max_tokens: 800,
+      });
+
+      summary = completion.choices[0]?.message?.content?.trim() || "";
+    }
+
+    if (!summary) throw new Error("Empty response from AI");
+    res.json({ summary });
+  } catch (error) {
+    console.error("Summarize error:", error.message);
+    res.status(500).json({ error: "Failed to generate summary" });
+  }
+});
+
 // --- Server Listen ---
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
