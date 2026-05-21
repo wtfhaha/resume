@@ -794,21 +794,28 @@ app.post("/api/extract-title", async (req, res) => {
     return res.status(400).json({ error: "Invalid or missing resumeText" });
   }
 
-  const prompt = `Your task is to extract the single primary professional job title from the provided resume text. Follow these instructions carefully:
+  const prompt = `Your task is to extract the primary professional job title from the provided resume text, then broaden it to a level that works well as a job search query.
+
+Follow these instructions carefully:
 1. Focus on the area directly below the candidate's name, as this often contains the main title.
-2. If multiple titles seem possible, choose the one that represents the candidate's main professional role (usually the most senior or most recent, if determinable from context near the top).
+2. If multiple titles seem possible, choose the one that represents the candidate's main professional role (usually the most senior or most recent).
 3. Do NOT extract section headers like "Summary", "Experience", "Skills", "Education", "Projects", "Languages".
 4. Do NOT extract company names or university names.
-5. Do NOT extract generic phrases or descriptions; identify the specific job title.
-6. Format your response to contain ONLY the extracted job title text. Do not add any introductory phrases, explanations, labels, or markdown formatting.
+5. BROADEN the title for job search use:
+   - Remove entry-level qualifiers: "Intern", "Internee", "Trainee", "Apprentice", "Entry Level", "Graduate" → drop them and keep the core title. Example: "Financial Analyst Intern" → "Financial Analyst", "Marketing Intern" → "Marketing Specialist".
+   - Remove overly narrow sub-specializations appended after "&" or "/" if they make the title too specific for a broad search. Example: "3D Designer & Visualizer" → "3D Designer".
+   - Keep seniority levels that are commonly searched (Junior, Mid-Level, Senior, Lead, Principal, Director, VP) — these are fine.
+   - If the title is already broad and commonly searched, keep it exactly as-is.
+6. Format your response to contain ONLY the final job title. No introductory phrases, explanations, labels, or markdown.
 
-Examples of correct output:
-"Software Engineer"
-"Senior Graphic Designer"
-"Project Manager"
-"3D Designer & Visualizer"
-"Architect"
-"Marketing Director"
+Examples:
+"Financial Analyst Intern" → "Financial Analyst"
+"Marketing Intern" → "Marketing Specialist"
+"Software Engineer" → "Software Engineer"
+"Senior Graphic Designer" → "Senior Graphic Designer"
+"3D Designer & Visualizer" → "3D Designer"
+"Junior Product Manager" → "Junior Product Manager"
+"Data Science Trainee" → "Data Scientist"
 
 Resume Text:
 ---
