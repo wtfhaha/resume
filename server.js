@@ -60,6 +60,10 @@ const deepInfraChatCompletion = async ({
           messages,
           temperature,
           max_tokens,
+          // Disable Qwen3 reasoning mode so we don't get <think>...</think> blocks
+          // in the response. Ignored by non-Qwen models. Belt-and-suspenders with
+          // the post-processing strip below.
+          chat_template_kwargs: { enable_thinking: false },
         }),
       });
 
@@ -77,7 +81,21 @@ const deepInfraChatCompletion = async ({
         );
       }
 
-      return response.json();
+      // Strip any <think>...</think> reasoning blocks that reasoning-capable
+      // models may include (e.g. Qwen3, DeepSeek-R1). This makes the helper
+      // model-agnostic for all downstream callers.
+      const data = await response.json();
+      if (data?.choices) {
+        for (const choice of data.choices) {
+          if (choice?.message?.content && typeof choice.message.content === "string") {
+            choice.message.content = choice.message.content
+              .replace(/<think>[\s\S]*?<\/think>/gi, "")
+              .replace(/<think>[\s\S]*$/i, "") // unterminated <think> (truncated output)
+              .trim();
+          }
+        }
+      }
+      return data;
     } catch (error) {
       if (attempt === retries) {
         console.error("DeepInfra API call failed after maximum retries:", error);
