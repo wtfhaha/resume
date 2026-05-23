@@ -1324,6 +1324,210 @@ Summary:`;
   }
 });
 
+// ════════════════════════════════════════════════════════════════════════════
+// Interview Prep — generate likely interview questions + suggested answers
+// ════════════════════════════════════════════════════════════════════════════
+
+app.post("/api/interview-questions", async (req, res) => {
+  if (!validateApiKey()) {
+    return res.status(500).json({ error: "API key not configured" });
+  }
+
+  const { jobDescription, resume, language } = req.body;
+
+  if (!jobDescription || typeof jobDescription !== "string" || jobDescription.trim().length < 30) {
+    return res.status(400).json({ error: "Job description is required (minimum 30 characters)" });
+  }
+
+  const languageInstruction =
+    language === "ar"
+      ? "Write the questions, suggested answers, and tips in Arabic."
+      : "Write the questions, suggested answers, and tips in English.";
+
+  const resumeBlock = resume && resume.trim()
+    ? `\n\nCandidate resume (use to tailor STAR examples and emphasize relevant strengths):\n---\n${resume.trim().slice(0, 8000)}\n---`
+    : "";
+
+  const prompt = `You are an expert career coach and former hiring manager. Given a job description${resume ? " and a candidate resume" : ""}, generate exactly 12 likely interview questions tailored to this role.
+
+For each question, return:
+- "question": the actual interview question (1 sentence)
+- "category": one of "behavioral", "technical", "situational", "culture"
+- "difficulty": one of "easy", "medium", "hard"
+- "suggestedAnswer": a strong 3-5 sentence answer. For behavioral questions, structure it using the STAR method (Situation, Task, Action, Result). Use concrete examples${resume ? " from the candidate's actual background" : ""}.
+- "tips": one short sentence of guidance on what to emphasize or avoid.
+
+Mix categories: aim for ~5 behavioral, ~3 technical/role-specific, ~2 situational, ~2 culture-fit.
+Vary difficulty: include 3 easy warm-ups, 6 medium, 3 hard challenge questions.
+
+${languageInstruction}
+
+Return ONLY a JSON object in this exact shape, no markdown fences, no preamble:
+{"questions":[{"question":"...","category":"...","difficulty":"...","suggestedAnswer":"...","tips":"..."}]}
+
+Job description:
+---
+${jobDescription.trim().slice(0, 8000)}
+---${resumeBlock}`;
+
+  try {
+    const completion = await deepInfraChatCompletion({
+      messages: [
+        { role: "system", content: "You are an expert career coach. You always respond with valid JSON only, no markdown, no preamble." },
+        { role: "user",   content: prompt },
+      ],
+      temperature: 0.6,
+      max_tokens: 4000,
+    });
+
+    let raw = completion.choices[0]?.message?.content?.trim() || "";
+    raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+    const firstBrace = raw.indexOf("{");
+    const lastBrace  = raw.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1) raw = raw.slice(firstBrace, lastBrace + 1);
+
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch (e) {
+      console.error("Interview Prep — JSON parse failed:", e.message, raw.slice(0, 300));
+      return res.status(500).json({ error: "AI returned malformed response. Try again." });
+    }
+
+    const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+    if (questions.length === 0) {
+      return res.status(500).json({ error: "AI returned no questions. Try again." });
+    }
+    const normalized = questions.map(q => ({
+      question:        String(q.question || "").trim(),
+      category:        ["behavioral", "technical", "situational", "culture"].includes(q.category) ? q.category : "behavioral",
+      difficulty:      ["easy", "medium", "hard"].includes(q.difficulty) ? q.difficulty : "medium",
+      suggestedAnswer: String(q.suggestedAnswer || "").trim(),
+      tips:            String(q.tips || "").trim(),
+    })).filter(q => q.question && q.suggestedAnswer);
+
+    res.json({ questions: normalized });
+  } catch (error) {
+    console.error("Interview Prep error:", error.message);
+    res.status(500).json({ error: "Failed to generate questions" });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Interview Prep — Puppeteer PDF cheat sheet
+// ════════════════════════════════════════════════════════════════════════════
+
+const buildInterviewPrepHtml = ({ jobTitle, questions, language }) => {
+  const isAr = language === "ar";
+  const dir  = isAr ? "rtl" : "ltr";
+  const langAttr = isAr ? "ar" : "en";
+
+  const categoryLabels = isAr
+    ? { behavioral: "سلوكي", technical: "تقني", situational: "موقفي", culture: "ثقافة" }
+    : { behavioral: "Behavioral", technical: "Technical", situational: "Situational", culture: "Culture" };
+
+  const difficultyLabels = isAr
+    ? { easy: "سهل", medium: "متوسط", hard: "صعب" }
+    : { easy: "Easy", medium: "Medium", hard: "Hard" };
+
+  const labels = isAr
+    ? { title: "تحضير المقابلة", role: "الدور", suggestedAnswer: "اقتراح للإجابة", tips: "نصيحة", footer: "تم إنشاؤه بواسطة my-aitools.online" }
+    : { title: "Interview Prep", role: "Role", suggestedAnswer: "Suggested answer", tips: "Tip", footer: "Generated by my-aitools.online" };
+
+  const escape = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  const cards = questions.map((q, i) => `
+    <div class="card">
+      <div class="card-h">
+        <div class="num">${i + 1}</div>
+        <div class="meta">
+          <span class="cat cat-${q.category}">${categoryLabels[q.category]}</span>
+          <span class="diff diff-${q.difficulty}">${difficultyLabels[q.difficulty]}</span>
+        </div>
+      </div>
+      <div class="question">${escape(q.question)}</div>
+      <div class="answer-label">${labels.suggestedAnswer}</div>
+      <div class="answer">${escape(q.suggestedAnswer)}</div>
+      ${q.tips ? `<div class="tip"><span class="tip-label">💡 ${labels.tips}:</span> ${escape(q.tips)}</div>` : ""}
+    </div>
+  `).join("");
+
+  return `<!DOCTYPE html>
+<html lang="${langAttr}" dir="${dir}">
+<head>
+<meta charset="UTF-8">
+<style>
+  @page { margin: 14mm; size: A4; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; color: #1a1208; margin: 0; padding: 0; font-size: 10.5pt; line-height: 1.45; }
+  .header { border-bottom: 2pt solid #FF8428; padding-bottom: 8pt; margin-bottom: 14pt; }
+  .header h1 { margin: 0 0 4pt 0; font-size: 22pt; font-weight: 900; letter-spacing: -0.5pt; color: #1a1208; }
+  .header .sub { font-size: 11pt; color: #6f5a4c; font-weight: 600; }
+  .card { border: 0.7pt solid #e2d5c5; border-radius: 6pt; padding: 11pt 13pt; margin-bottom: 9pt; page-break-inside: avoid; background: #fffdf8; }
+  .card-h { display: flex; align-items: center; gap: 8pt; margin-bottom: 6pt; }
+  .num { width: 22pt; height: 22pt; border-radius: 50%; background: linear-gradient(135deg, #FF8428, #D95F13); color: #fff; font-weight: 900; font-size: 11pt; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .meta { display: flex; gap: 5pt; }
+  .cat, .diff { font-size: 8pt; font-weight: 800; padding: 2pt 7pt; border-radius: 999pt; text-transform: uppercase; letter-spacing: 0.5pt; }
+  .cat-behavioral  { background: #FFE9D0; color: #c2580c; }
+  .cat-technical   { background: #DDE9FF; color: #1d4ed8; }
+  .cat-situational { background: #DCFCE7; color: #166534; }
+  .cat-culture     { background: #FCE7F3; color: #9d174d; }
+  .diff-easy   { background: #DCFCE7; color: #166534; }
+  .diff-medium { background: #FEF3C7; color: #92400e; }
+  .diff-hard   { background: #FEE2E2; color: #991b1b; }
+  .question { font-size: 12pt; font-weight: 700; margin-bottom: 8pt; color: #1a1208; }
+  .answer-label { font-size: 8.5pt; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8pt; color: #c2580c; margin-bottom: 3pt; }
+  .answer { font-size: 10pt; line-height: 1.55; margin-bottom: 7pt; color: #2a1f15; }
+  .tip { font-size: 9pt; padding: 6pt 9pt; background: #fff5e6; border-${isAr ? "right" : "left"}: 2.5pt solid #FF8428; border-radius: 3pt; color: #4a3a2c; }
+  .tip-label { font-weight: 800; color: #c2580c; }
+  .footer { margin-top: 12pt; padding-top: 8pt; border-top: 0.5pt solid #e2d5c5; font-size: 8pt; color: #999; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>${labels.title}</h1>
+    ${jobTitle ? `<div class="sub">${labels.role}: ${escape(jobTitle)}</div>` : ""}
+  </div>
+  ${cards}
+  <div class="footer">${labels.footer}</div>
+</body>
+</html>`;
+};
+
+app.post("/api/generate-interview-pdf", async (req, res) => {
+  const { jobTitle, questions, language } = req.body;
+
+  if (!Array.isArray(questions) || questions.length === 0) {
+    return res.status(400).json({ error: "No questions provided" });
+  }
+
+  let browser;
+  try {
+    const html = buildInterviewPrepHtml({ jobTitle, questions, language });
+    browser = await puppeteer.launch({
+      headless: "new",
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "networkidle0" });
+    const pdf = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      margin: { top: "14mm", right: "14mm", bottom: "14mm", left: "14mm" },
+    });
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="interview-prep.pdf"`,
+      "Content-Length": pdf.length,
+    });
+    res.send(pdf);
+  } catch (error) {
+    console.error("Interview PDF error:", error.message);
+    res.status(500).json({ error: "Failed to generate PDF" });
+  } finally {
+    if (browser) await browser.close();
+  }
+});
+
 // --- Server Listen ---
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);

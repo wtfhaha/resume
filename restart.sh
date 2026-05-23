@@ -1,8 +1,12 @@
 #!/bin/sh
-# Restart both servers
-echo "Starting server.js (port 5000)..."
-node /Users/react/Downloads/resume-optimizer-app/server/server.js &
-echo "Starting server-prod.js (port 5001)..."
-node /Users/react/Downloads/resume-optimizer-app/server/server-prod.js &
+# Restart both servers (run from the server/ directory or anywhere — paths resolve relative to this script)
+SCRIPT_DIR="$( cd "$( dirname "$0" )" && pwd )"
+
+echo "Starting server.js..."
+node "$SCRIPT_DIR/server.js" &
+
+echo "Starting server-prod.js..."
+node "$SCRIPT_DIR/server-prod.js" &
+
 echo "Both servers started."
 echo "PIDs: $(jobs -p)"
