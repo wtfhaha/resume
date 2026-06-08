@@ -1,7 +1,7 @@
 {
-  "name": "resume-optimizer-server",
+  "name": "my-aitools-server",
   "version": "1.0.0",
-  "description": "Backend server for Resume Optimizer",
+  "description": "Shared Express backend for my-aitools.online (resume optimizer, document writer, quick summarize, interview prep)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
