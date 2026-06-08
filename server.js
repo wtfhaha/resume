@@ -866,6 +866,14 @@ Job Title:`;
   }
 });
 
+// Usage indicator only — counts successful optimizations, stores no content (resets on restart/redeploy)
+let resumeOptimizerUsageCount = 0;
+let resumeOptimizerLastUsedAt = null;
+
+app.get("/api/resume-optimizer/usage", (req, res) => {
+  res.json({ totalUses: resumeOptimizerUsageCount, lastUsedAt: resumeOptimizerLastUsedAt });
+});
+
 // Optimize Resume Endpoint (Returns JSON)
 app.post("/api/optimize-resume", async (req, res) => {
   console.log("[/api/optimize-resume] Received request");
@@ -968,6 +976,10 @@ app.post("/api/optimize-resume", async (req, res) => {
     console.log("[/api/optimize-resume] Sanitizing JSON response...");
     const sanitizedJson = sanitizeResumeJson(optimizedResumeJson);
     console.log("[/api/optimize-resume] Sanitization complete.");
+
+    resumeOptimizerUsageCount += 1;
+    resumeOptimizerLastUsedAt = new Date().toISOString();
+    console.log(`[Resume Optimizer] used — total ${resumeOptimizerUsageCount}, at ${resumeOptimizerLastUsedAt}`);
 
     res.json({ optimizedResumeJson: sanitizedJson }); // Send sanitized JSON
   } catch (error) {
