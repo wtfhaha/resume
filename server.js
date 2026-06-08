@@ -11,7 +11,7 @@ const DEEPINFRA_API_URL =
   process.env.DEEPINFRA_API_URL || "https://api.deepinfra.com/v1/openai";
 const DEEPINFRA_API_KEY = process.env.DEEPINFRA_API_KEY;
 const DEEPINFRA_MODEL =
-  process.env.DEEPINFRA_MODEL || "deepseek-ai/DeepSeek-V4-Pro";
+  process.env.DEEPINFRA_MODEL || "Qwen/Qwen3-30B-A3B";
 
 // dotenv.config(); // No longer loading from .env file
 
@@ -1346,6 +1346,14 @@ Summary:`;
 // Interview Prep — generate likely interview questions + suggested answers
 // ════════════════════════════════════════════════════════════════════════════
 
+// Usage indicator only — counts successful generations, stores no content (resets on restart/redeploy)
+let interviewPrepUsageCount = 0;
+let interviewPrepLastUsedAt = null;
+
+app.get("/api/interview-prep/usage", (req, res) => {
+  res.json({ totalUses: interviewPrepUsageCount, lastUsedAt: interviewPrepLastUsedAt });
+});
+
 app.post("/api/interview-questions", async (req, res) => {
   if (!validateApiKey()) {
     return res.status(500).json({ error: "API key not configured" });
@@ -1422,6 +1430,10 @@ ${jobDescription.trim().slice(0, 8000)}
       suggestedAnswer: String(q.suggestedAnswer || "").trim(),
       tips:            String(q.tips || "").trim(),
     })).filter(q => q.question && q.suggestedAnswer);
+
+    interviewPrepUsageCount += 1;
+    interviewPrepLastUsedAt = new Date().toISOString();
+    console.log(`[Interview Prep] used — total ${interviewPrepUsageCount}, at ${interviewPrepLastUsedAt}`);
 
     res.json({ questions: normalized });
   } catch (error) {
