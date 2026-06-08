@@ -21,6 +21,124 @@ const port = process.env.PORT || 5001;
 app.use(cors());
 app.use(express.json());
 
+// Trust Render/Cloudflare's proxy chain so req.ip reflects the real visitor IP (needed for unique-use counts)
+app.set("trust proxy", true);
+
+// ════════════════════════════════════════════════════════════════════════════
+// Lightweight usage indicators — total uses + unique visitors, zero content ever stored.
+// In-memory only (resets on restart/redeploy). Just enough to answer "is this used".
+// ════════════════════════════════════════════════════════════════════════════
+function createUsageTracker(label) {
+  const ips = new Set();
+  let count = 0;
+  let lastUsedAt = null;
+  return {
+    record(req) {
+      count += 1;
+      ips.add(req.ip || "unknown");
+      lastUsedAt = new Date().toISOString();
+      console.log(`[${label}] used — total ${count}, unique ${ips.size}, at ${lastUsedAt}`);
+    },
+    stats() {
+      return { totalUses: count, totalUniqueUses: ips.size, lastUsedAt };
+    },
+  };
+}
+
+const usageTrackers = {
+  resumeOptimizer: createUsageTracker("Resume Optimizer"),
+  interviewPrep: createUsageTracker("Interview Prep"),
+};
+
+const USAGE_DASHBOARD_HTML = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>my-aitools — usage</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-font-smoothing:antialiased; }
+  body {
+    min-height: 100vh;
+    background: #0b0c10;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    color: #f5e6cc;
+    display: flex; align-items: center; justify-content: center;
+    position: relative; overflow: hidden;
+    padding: 64px 24px;
+  }
+  .glow { position: absolute; border-radius: 50%; filter: blur(140px); pointer-events: none; }
+  .glow1 { width: 620px; height: 620px; background: radial-gradient(circle, rgba(255,132,40,0.18), transparent 65%); top: -220px; left: -160px; }
+  .glow2 { width: 520px; height: 520px; background: radial-gradient(circle, rgba(255,132,40,0.12), transparent 65%); bottom: -220px; right: -130px; }
+  .wrap { position: relative; z-index: 2; width: 100%; max-width: 880px; }
+  h1 { font-size: 27px; font-weight: 800; margin-bottom: 6px; letter-spacing: -0.5px; }
+  h1 span { color: #FF8428; }
+  .sub { color: rgba(245,230,204,0.4); font-size: 14px; margin-bottom: 38px; font-weight: 500; }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 720px) { .cards { grid-template-columns: 1fr; } }
+  .card {
+    background: linear-gradient(160deg, #1c1410, #241a10);
+    border: 1px solid rgba(255,132,40,0.25);
+    border-radius: 22px; padding: 28px 30px;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.35);
+  }
+  .card h2 { font-size: 17px; font-weight: 800; color: #f5e6cc; margin-bottom: 24px; display:flex; align-items:center; gap:10px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: linear-gradient(135deg, #FF8428, #ffb060); box-shadow: 0 0 14px rgba(255,132,40,0.7); }
+  .stats { display: flex; gap: 34px; margin-bottom: 22px; }
+  .stat-num { font-size: 44px; font-weight: 900; color: #FF8428; line-height: 1; letter-spacing: -1.5px; }
+  .stat-label { font-size: 12px; color: rgba(245,230,204,0.4); font-weight: 700; margin-top: 8px; letter-spacing: 1.2px; text-transform: uppercase; }
+  .last { font-size: 13px; color: rgba(245,230,204,0.4); border-top: 1px solid rgba(255,255,255,0.07); padding-top: 16px; }
+  .last b { color: rgba(245,230,204,0.8); font-weight: 700; }
+  .foot { margin-top: 30px; text-align: center; font-size: 12px; color: rgba(245,230,204,0.28); letter-spacing: 0.3px; }
+</style>
+</head>
+<body>
+  <div class="glow glow1"></div>
+  <div class="glow glow2"></div>
+  <div class="wrap">
+    <h1>my-aitools<span>.online</span> — usage</h1>
+    <div class="sub">Live indicator only — no content is ever stored, just counts, unique visitors, and timestamps.</div>
+    <div class="cards" id="cards"></div>
+    <div class="foot" id="updated">loading…</div>
+  </div>
+  <script>
+    const SOURCES = [
+      { name: 'Resume Optimizer', url: '/api/resume-optimizer/usage' },
+      { name: 'Interview Prep',   url: '/api/interview-prep/usage' },
+    ];
+    function fmtTime(iso) {
+      if (!iso) return 'no uses yet';
+      return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    }
+    async function load() {
+      const cards = document.getElementById('cards');
+      cards.innerHTML = '';
+      for (const s of SOURCES) {
+        let d = { totalUses: '—', totalUniqueUses: '—', lastUsedAt: null };
+        try { d = await (await fetch(s.url)).json(); } catch (e) {}
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML =
+          '<h2><span class="dot"></span>' + s.name + '</h2>' +
+          '<div class="stats">' +
+            '<div><div class="stat-num">' + d.totalUses + '</div><div class="stat-label">Total uses</div></div>' +
+            '<div><div class="stat-num">' + d.totalUniqueUses + '</div><div class="stat-label">Unique visitors</div></div>' +
+          '</div>' +
+          '<div class="last">Last used: <b>' + fmtTime(d.lastUsedAt) + '</b></div>';
+        cards.appendChild(card);
+      }
+      document.getElementById('updated').textContent = 'Updated ' + new Date().toLocaleTimeString() + ' · refreshes every 30s · counts reset on redeploy';
+    }
+    load();
+    setInterval(load, 30000);
+  </script>
+</body>
+</html>`;
+
+app.get("/api/usage", (req, res) => {
+  res.set("Content-Type", "text/html").send(USAGE_DASHBOARD_HTML);
+});
+
 // --- Helper: Validate API Key ---
 const validateApiKey = () => {
   if (
@@ -866,12 +984,8 @@ Job Title:`;
   }
 });
 
-// Usage indicator only — counts successful optimizations, stores no content (resets on restart/redeploy)
-let resumeOptimizerUsageCount = 0;
-let resumeOptimizerLastUsedAt = null;
-
 app.get("/api/resume-optimizer/usage", (req, res) => {
-  res.json({ totalUses: resumeOptimizerUsageCount, lastUsedAt: resumeOptimizerLastUsedAt });
+  res.json(usageTrackers.resumeOptimizer.stats());
 });
 
 // Optimize Resume Endpoint (Returns JSON)
@@ -977,9 +1091,7 @@ app.post("/api/optimize-resume", async (req, res) => {
     const sanitizedJson = sanitizeResumeJson(optimizedResumeJson);
     console.log("[/api/optimize-resume] Sanitization complete.");
 
-    resumeOptimizerUsageCount += 1;
-    resumeOptimizerLastUsedAt = new Date().toISOString();
-    console.log(`[Resume Optimizer] used — total ${resumeOptimizerUsageCount}, at ${resumeOptimizerLastUsedAt}`);
+    usageTrackers.resumeOptimizer.record(req);
 
     res.json({ optimizedResumeJson: sanitizedJson }); // Send sanitized JSON
   } catch (error) {
@@ -1358,12 +1470,8 @@ Summary:`;
 // Interview Prep — generate likely interview questions + suggested answers
 // ════════════════════════════════════════════════════════════════════════════
 
-// Usage indicator only — counts successful generations, stores no content (resets on restart/redeploy)
-let interviewPrepUsageCount = 0;
-let interviewPrepLastUsedAt = null;
-
 app.get("/api/interview-prep/usage", (req, res) => {
-  res.json({ totalUses: interviewPrepUsageCount, lastUsedAt: interviewPrepLastUsedAt });
+  res.json(usageTrackers.interviewPrep.stats());
 });
 
 app.post("/api/interview-questions", async (req, res) => {
@@ -1443,9 +1551,7 @@ ${jobDescription.trim().slice(0, 8000)}
       tips:            String(q.tips || "").trim(),
     })).filter(q => q.question && q.suggestedAnswer);
 
-    interviewPrepUsageCount += 1;
-    interviewPrepLastUsedAt = new Date().toISOString();
-    console.log(`[Interview Prep] used — total ${interviewPrepUsageCount}, at ${interviewPrepLastUsedAt}`);
+    usageTrackers.interviewPrep.record(req);
 
     res.json({ questions: normalized });
   } catch (error) {
