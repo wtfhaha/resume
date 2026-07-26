@@ -1676,6 +1676,259 @@ app.post("/api/generate-interview-pdf", async (req, res) => {
   }
 });
 
+// ─── Shortlist: Analyze CVs ──────────────────────────────────────────────────
+app.post("/api/shortlist/analyze", async (req, res) => {
+  const { mode, jd, title, files } = req.body;
+  if (!files || !Array.isArray(files) || files.length === 0) {
+    return res.status(400).json({ error: "No files provided" });
+  }
+
+  const systemMessage = {
+    role: "system",
+    content: "You are an expert HR analyst and talent acquisition specialist. Analyze CVs and return structured JSON only — no prose, no markdown, just raw JSON.",
+  };
+
+  const buildUserPrompt = (file) => {
+    const modeBlock =
+      mode === "jd"
+        ? `JOB DESCRIPTION:\n${jd}`
+        : mode === "title"
+        ? `JOB TITLE: ${title}`
+        : "GENERAL ANALYSIS MODE — no specific role. Provide a comprehensive profile.";
+
+    return `${modeBlock}
+
+CV FILENAME: ${file.filename}
+CV CONTENT:
+${file.text.slice(0, 6000)}
+
+Return a JSON object with EXACTLY these fields and no others:
+{
+  "name": "candidate full name or 'Unknown'",
+  "email": "email address found in CV or '—'",
+  "phone": "phone number found in CV or '—'",
+  "matchScore": ${mode === "general" ? "null" : "integer 0-100 (match to the role)"},
+  "nationality": "nationality as a single adjective (e.g. Egyptian, Indian, British) or 'Unknown'",
+  "yearsExperience": "total years as a number string, or '—' if unclear",
+  "currentRole": "most recent job title or '—'",
+  "topSkills": ["skill1", "skill2", "skill3", "skill4", "skill5"],
+  "strengths": ${mode === "general" ? '["key strength 1", "key strength 2", "key strength 3"]' : '["strength vs role 1", "strength vs role 2", "strength vs role 3"]'},
+  "gaps": ${mode === "general" ? '[]' : '["gap vs role 1", "gap vs role 2"]'},
+  "summary": "2–3 sentence summary of candidate${mode === "general" ? "" : " relevant to the role"}"
+}
+
+Output raw JSON only. No markdown, no code fences, no explanation.`;
+  };
+
+  try {
+    const results = await Promise.all(
+      files.map(async (file) => {
+        const messages = [
+          systemMessage,
+          { role: "user", content: buildUserPrompt(file) },
+        ];
+        const completion = await deepInfraChatCompletion({
+          messages,
+          temperature: 0.2,
+          max_tokens: 2000,
+        });
+        let raw = completion?.choices?.[0]?.message?.content?.trim() || "";
+        // Strip markdown code fences if the model added them despite instructions
+        raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+        // Grab everything from first { to last } (mirrors interview-prep pattern)
+        const firstBrace = raw.indexOf("{");
+        const lastBrace = raw.lastIndexOf("}");
+        if (firstBrace !== -1 && lastBrace !== -1) raw = raw.slice(firstBrace, lastBrace + 1);
+
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch (e) {
+          console.error(`[shortlist] Parse failed for ${file.filename}. Raw length: ${raw.length}. First 500 chars:`, raw.slice(0, 500));
+          parsed = {
+            name: file.filename.replace(/\.[^.]+$/, ""),
+            email: "—",
+            phone: "—",
+            matchScore: null,
+            nationality: "Unknown",
+            yearsExperience: "—",
+            currentRole: "—",
+            topSkills: [],
+            strengths: [],
+            gaps: [],
+            summary: `Parse failed. Raw AI output: ${raw.slice(0, 200) || "(empty)"}`,
+          };
+        }
+
+        return { ...parsed, filename: file.filename };
+      })
+    );
+
+    res.json({ candidates: results });
+  } catch (error) {
+    console.error("Shortlist analyze error:", error.message);
+    res.status(500).json({ error: "Analysis failed" });
+  }
+});
+
+// ─── Shortlist: Export PDF ────────────────────────────────────────────────────
+app.post("/api/shortlist/export-pdf", async (req, res) => {
+  const { candidates, poolStats, jobLabel } = req.body;
+  if (!candidates || !Array.isArray(candidates)) {
+    return res.status(400).json({ error: "No candidates provided" });
+  }
+
+  const scoreColor = (score) => {
+    if (score === null) return "#94A3B8";
+    if (score >= 75) return "#10B981";
+    if (score >= 50) return "#FF8428";
+    if (score >= 25) return "#F59E0B";
+    return "#EF4444";
+  };
+
+  const scoreLabel = (score) => {
+    if (score === null) return "General";
+    if (score >= 75) return "Strong Match";
+    if (score >= 50) return "Good Match";
+    if (score >= 25) return "Partial";
+    return "Poor Match";
+  };
+
+  const candidateRows = candidates
+    .map(
+      (c, i) => `
+    <tr class="${i % 2 === 0 ? "even" : "odd"}${c.isStray ? " stray" : ""}">
+      <td class="rank">#${i + 1}</td>
+      <td>
+        <div class="name">${c.name}</div>
+        <div class="role">${c.currentRole !== "—" ? c.currentRole : ""}${c.yearsExperience !== "—" ? ` · ${c.yearsExperience} yrs` : ""}</div>
+      </td>
+      <td>${c.nationality}</td>
+      <td>
+        ${
+          c.matchScore !== null
+            ? `<span class="score-badge" style="color:${scoreColor(c.matchScore)};border-color:${scoreColor(c.matchScore)}">
+              ${c.matchScore}% <span class="score-lbl">${scoreLabel(c.matchScore)}</span>
+            </span>`
+            : `<span class="score-badge" style="color:#94A3B8;border-color:#94A3B8">General</span>`
+        }
+      </td>
+      <td>${c.topSkills.slice(0, 4).join(", ")}</td>
+      <td>
+        ${c.strengths.map((s) => `<div class="strength">✓ ${s}</div>`).join("")}
+      </td>
+      <td>
+        ${c.gaps.map((g) => `<div class="gap">✗ ${g}</div>`).join("")}
+      </td>
+    </tr>
+    <tr class="summary-row ${i % 2 === 0 ? "even" : "odd"}">
+      <td colspan="7" class="summary">${c.summary}</td>
+    </tr>`
+    )
+    .join("");
+
+  const natRows = Object.entries(poolStats.nationalityBreakdown || {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(
+      ([nat, count]) =>
+        `<span class="nat-pill">${nat}: <strong>${count}</strong></span>`
+    )
+    .join("");
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; font-size: 11px; color: #1a1a1a; background: #fff; padding: 24px; }
+  h1 { font-size: 20px; font-weight: 800; color: #111; letter-spacing: -0.03em; }
+  .meta { color: #666; font-size: 10px; margin-top: 4px; margin-bottom: 20px; }
+  .stats { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+  .stat-box { border: 1px solid #e5e5e5; border-radius: 8px; padding: 10px 14px; min-width: 100px; }
+  .stat-val { font-size: 18px; font-weight: 800; color: #111; }
+  .stat-lbl { font-size: 9px; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+  .nat-section { margin-bottom: 16px; }
+  .nat-section h3 { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #888; margin-bottom: 8px; }
+  .nat-pill { display: inline-block; background: #f5f5f5; border-radius: 4px; padding: 3px 8px; margin: 2px; font-size: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+  th { background: #f8f8f8; text-align: left; padding: 8px 10px; font-weight: 700; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: #666; border-bottom: 2px solid #eee; }
+  td { padding: 8px 10px; vertical-align: top; border-bottom: 1px solid #f0f0f0; }
+  tr.even td { background: #fff; }
+  tr.odd td { background: #fafafa; }
+  tr.stray td { background: #fff5f5 !important; }
+  tr.summary-row td { padding: 4px 10px 10px; font-size: 10px; color: #555; line-height: 1.5; }
+  .rank { font-weight: 800; color: #888; width: 30px; }
+  .name { font-weight: 700; color: #111; }
+  .role { font-size: 9.5px; color: #888; margin-top: 2px; }
+  .score-badge { display: inline-block; border: 1.5px solid; border-radius: 4px; padding: 2px 7px; font-weight: 700; font-size: 10px; white-space: nowrap; }
+  .score-lbl { font-weight: 400; font-size: 9px; }
+  .strength { color: #059669; font-size: 9.5px; line-height: 1.6; }
+  .gap { color: #DC2626; font-size: 9.5px; line-height: 1.6; }
+  .footer { margin-top: 24px; font-size: 9px; color: #bbb; text-align: center; border-top: 1px solid #eee; padding-top: 12px; }
+  @media print { body { padding: 0; } }
+</style>
+</head>
+<body>
+  <h1>Candidate Shortlist Report</h1>
+  <div class="meta">Role: ${jobLabel} · ${candidates.length} candidates screened · Generated ${new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}</div>
+
+  <div class="stats">
+    <div class="stat-box"><div class="stat-val">${poolStats.totalCandidates}</div><div class="stat-lbl">Total CVs</div></div>
+    ${poolStats.avgMatchScore !== null ? `<div class="stat-box"><div class="stat-val">${poolStats.avgMatchScore}%</div><div class="stat-lbl">Avg Match</div></div>` : ""}
+    ${poolStats.topMatch ? `<div class="stat-box"><div class="stat-val" style="font-size:13px">${poolStats.topMatch}</div><div class="stat-lbl">Top Candidate</div></div>` : ""}
+    <div class="stat-box"><div class="stat-val">${Object.keys(poolStats.nationalityBreakdown || {}).length}</div><div class="stat-lbl">Nationalities</div></div>
+    ${poolStats.straysCount > 0 ? `<div class="stat-box"><div class="stat-val" style="color:#EF4444">${poolStats.straysCount}</div><div class="stat-lbl">Strays</div></div>` : ""}
+  </div>
+
+  ${
+    natRows
+      ? `<div class="nat-section">
+    <h3>Nationality Breakdown</h3>
+    ${natRows}
+  </div>`
+      : ""
+  }
+
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>Candidate</th><th>Nationality</th><th>Score</th><th>Top Skills</th><th>Strengths</th><th>Gaps</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${candidateRows}
+    </tbody>
+  </table>
+
+  <div class="footer">Confidential — For internal HR use only</div>
+</body>
+</html>`;
+
+  let browser;
+  try {
+    const puppeteer = require("puppeteer");
+    browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "networkidle0" });
+    const pdf = await page.pdf({
+      format: "A4",
+      landscape: true,
+      printBackground: true,
+      margin: { top: "12mm", right: "12mm", bottom: "12mm", left: "12mm" },
+    });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'attachment; filename="shortlist-report.pdf"');
+    res.send(pdf);
+  } catch (error) {
+    console.error("Shortlist PDF error:", error.message);
+    res.status(500).json({ error: "Failed to generate PDF" });
+  } finally {
+    if (browser) await browser.close();
+  }
+});
+
 // --- Server Listen ---
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
